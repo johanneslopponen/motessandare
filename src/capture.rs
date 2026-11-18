@@ -140,11 +140,11 @@ impl Capture {
             }
 
             // ALSA may refuse a second open for probing while we already capture.
-            if self.streams.contains_key(&id) {
-                if let Some(input) = self.devices.remove(&id) {
-                    found.insert(id, input);
-                    continue;
-                }
+            if self.streams.contains_key(&id)
+                && let Some(input) = self.devices.remove(&id)
+            {
+                found.insert(id, input);
+                continue;
             }
 
             if !device.supports_input() {

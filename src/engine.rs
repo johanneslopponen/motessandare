@@ -352,7 +352,7 @@ mod tests {
             right: Some(2),
             ..Source::default()
         };
-        let mut frame = vec![0.; 32];
+        let mut frame = [0.; 32];
         frame[16] = 0.75;
         frame[2] = -0.5;
         let input = Block {

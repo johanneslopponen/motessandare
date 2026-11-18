@@ -63,22 +63,10 @@ impl Output {
     }
 
     pub fn record(settings: &Recording, name: &str, channels: u16) -> Self {
-        let folder = PathBuf::from(&settings.folder);
-        let filename_format = settings.filename_format.clone();
-        let format = settings.format.clone();
-        let quality = settings.quality;
+        let settings = settings.clone();
         let name = name.to_owned();
         Self::start(128, move |receiver, state| {
-            run_record(
-                &folder,
-                &filename_format,
-                &name,
-                &format,
-                quality,
-                channels,
-                receiver,
-                &state,
-            );
+            run_record(&settings, &name, channels, receiver, &state);
         })
     }
 
@@ -112,12 +100,11 @@ impl Output {
     }
 
     pub fn push(&self, pcm: &[f32]) {
-        if let Some(sender) = &self.sender {
-            if !pcm.is_empty()
-                && matches!(sender.try_send(pcm.to_vec()), Err(TrySendError::Full(_)))
-            {
-                self.state.dropped.fetch_add(1, Relaxed);
-            }
+        if let Some(sender) = &self.sender
+            && !pcm.is_empty()
+            && matches!(sender.try_send(pcm.to_vec()), Err(TrySendError::Full(_)))
+        {
+            self.state.dropped.fetch_add(1, Relaxed);
         }
     }
 
@@ -151,23 +138,23 @@ pub fn wait_for_shutdown() {
 }
 
 fn ffmpeg_path() -> PathBuf {
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(executable_dir) = executable.parent() {
-            let binary = if cfg!(windows) {
-                "ffmpeg.exe"
-            } else {
-                "ffmpeg"
-            };
-            let adjacent = executable_dir.join(binary);
-            if adjacent.is_file() {
-                return adjacent;
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(contents) = executable_dir.parent() {
-                let resource = contents.join("Resources").join(binary);
-                if resource.is_file() {
-                    return resource;
-                }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(executable_dir) = executable.parent()
+    {
+        let binary = if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
+        let adjacent = executable_dir.join(binary);
+        if adjacent.is_file() {
+            return adjacent;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(contents) = executable_dir.parent() {
+            let resource = contents.join("Resources").join(binary);
+            if resource.is_file() {
+                return resource;
             }
         }
     }
@@ -288,15 +275,14 @@ fn run_stream(mut command: Command, mut receiver: Receiver<Vec<f32>>, state: &St
 }
 
 fn run_record(
-    folder: &Path,
-    filename_format: &str,
+    settings: &Recording,
     name: &str,
-    format: &str,
-    quality: u32,
     channels: u16,
     receiver: Receiver<Vec<f32>>,
     state: &State,
 ) {
+    let format = settings.format.as_str();
+    let quality = settings.quality;
     let (encoder, muxer, extension) = match format {
         "WAV" => (
             if quality >= 24 {
@@ -315,7 +301,12 @@ fn run_record(
             return;
         }
     };
-    let path = match reserve_recording_path(folder, filename_format, name, extension) {
+    let path = match reserve_recording_path(
+        Path::new(&settings.folder),
+        &settings.filename_format,
+        name,
+        extension,
+    ) {
         Ok(path) => path,
         Err(error) => {
             state.set_status(format!("Kunde inte skapa inspelningsfilen: {error}"));
