@@ -2927,4 +2927,170 @@ mod tests {
             "bulk pills should be right-aligned, not stretched: {str_start:?}"
         );
     }
+
+    #[test]
+    fn meter_color_follows_dbfs_thresholds_and_ticks_map_cleanly() {
+        let palette = Palette::for_theme(true);
+        let db_to_signal = |db: f32| 10.0_f32.powf(db / 20.0);
+
+        assert_eq!(meter_color(0.0, palette), palette.meter_ok);
+        assert_eq!(meter_color(f32::NAN, palette), palette.meter_ok);
+        assert_eq!(meter_color(db_to_signal(-24.0), palette), palette.meter_ok);
+        assert_eq!(meter_color(db_to_signal(-18.5), palette), palette.meter_ok);
+        assert_eq!(meter_color(db_to_signal(-18.0), palette), palette.meter_warn);
+        assert_eq!(meter_color(db_to_signal(-6.0), palette), palette.meter_warn);
+        assert_eq!(meter_color(db_to_signal(-3.0), palette), palette.meter_warn);
+        assert_eq!(meter_color(db_to_signal(-2.5), palette), palette.meter_peak);
+        assert_eq!(meter_color(db_to_signal(0.0), palette), palette.meter_peak);
+
+        let expected = [
+            (-60.0, 0.0),
+            (-40.0, 1.0 / 3.0),
+            (-20.0, 2.0 / 3.0),
+            (-12.0, 0.8),
+            (-6.0, 0.9),
+            (0.0, 1.0),
+        ];
+        for (db, frac) in expected {
+            let actual = meter_fraction(db_to_signal(db));
+            assert!(
+                (actual - frac).abs() < 1e-4,
+                "tick {db} dB expected fraction {frac}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_start_buttons_explain_why_and_trigger_hover() {
+        let mut source = Source::default();
+        assert_eq!(
+            source_stream_disabled_reason(&source, 0, false),
+            Some("Välj en ljudenhet i inställningarna")
+        );
+        assert_eq!(
+            source_record_disabled_reason(&source, false),
+            Some("Välj en ljudenhet i inställningarna")
+        );
+
+        source.device = "mic-1".to_owned();
+        source.recording.folder.clear();
+        assert_eq!(
+            source_stream_disabled_reason(&source, 0, false),
+            Some("Lägg till minst en destination")
+        );
+        assert_eq!(
+            source_record_disabled_reason(&source, false),
+            Some("Välj en inspelningsmapp")
+        );
+
+        source.recording.folder = "/tmp/rec".to_owned();
+        assert_eq!(source_stream_disabled_reason(&source, 1, false), None);
+        assert_eq!(source_record_disabled_reason(&source, false), None);
+
+        // Verify disabled custom button (Sense::hover) registers hover and shows tooltip.
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
+        let mut button_rect = Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let palette = Palette::for_theme(true);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let resp = with_disabled_reason(
+                        action_button(
+                            ui,
+                            Icon::Broadcast,
+                            "Starta sändning",
+                            false,
+                            palette.stream_accent,
+                            ButtonVariant::Neutral,
+                            palette,
+                        ),
+                        false,
+                        Some("Lägg till minst en destination"),
+                    );
+                    button_rect = resp.rect;
+                });
+            },
+        );
+        assert!(button_rect.width() > 0.0);
+
+        let mut hovered = false;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
+                events: vec![egui::Event::PointerMoved(button_rect.center())],
+                time: Some(2.0),
+                ..Default::default()
+            },
+            |ctx| {
+                let palette = Palette::for_theme(true);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let resp = with_disabled_reason(
+                        action_button(
+                            ui,
+                            Icon::Broadcast,
+                            "Starta sändning",
+                            false,
+                            palette.stream_accent,
+                            ButtonVariant::Neutral,
+                            palette,
+                        ),
+                        false,
+                        Some("Lägg till minst en destination"),
+                    );
+                    hovered = resp.hovered();
+                });
+            },
+        );
+        assert!(hovered, "disabled custom button should still detect hover");
+        assert!(
+            output.shapes.len() > 3,
+            "hovering disabled custom button should render tooltip shapes"
+        );
+    }
+
+    #[test]
+    fn password_visibility_toggle_is_scoped_per_destination_id() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
+        let mut dest_a = Destination {
+            id: 1,
+            password: "secret".to_owned(),
+            ..Destination::default()
+        };
+        let mut dest_b = Destination {
+            id: 2,
+            password: "other".to_owned(),
+            ..Destination::default()
+        };
+
+        let mut id_a = egui::Id::NULL;
+        let mut id_b = egui::Id::NULL;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let palette = Palette::for_theme(true);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.push_id(dest_a.id, |ui| {
+                    destination_settings(ui, &mut dest_a, palette);
+                    id_a = ui.make_persistent_id("show-password");
+                });
+                ui.push_id(dest_b.id, |ui| {
+                    destination_settings(ui, &mut dest_b, palette);
+                    id_b = ui.make_persistent_id("show-password");
+                });
+            });
+        });
+        assert_ne!(id_a, id_b);
+        assert!(!ctx.data(|d| d.get_temp::<bool>(id_a).unwrap_or(false)));
+        assert!(!ctx.data(|d| d.get_temp::<bool>(id_b).unwrap_or(false)));
+
+        ctx.data_mut(|d| d.insert_temp(id_a, true));
+        assert!(ctx.data(|d| d.get_temp::<bool>(id_a).unwrap_or(false)));
+        assert!(!ctx.data(|d| d.get_temp::<bool>(id_b).unwrap_or(false)));
+    }
 }
