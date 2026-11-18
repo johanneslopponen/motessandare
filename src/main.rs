@@ -7,7 +7,7 @@ mod settings;
 mod ui;
 
 use engine::Engine;
-use settings::{Destination, Recording, Source, settings_load, settings_save};
+use settings::{Destination, Recording, Settings, Source, settings_load, settings_save};
 
 fn app_icon() -> Option<eframe::egui::IconData> {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).ok()

@@ -64,6 +64,8 @@ fn stream_receiver(
     });
     (
         Destination {
+            id: 1,
+            name: "Test".into(),
             server: format!("http://{address}"),
             mount: mount.into(),
             user: "test-source".into(),

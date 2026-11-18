@@ -1,5 +1,5 @@
 use crate::{
-    Source,
+    Destination, Source,
     capture::{Capture, Reader},
     output::{self, Output},
 };
@@ -20,7 +20,7 @@ type Devices = Vec<(String, String, usize)>;
 
 #[derive(Default)]
 struct Session {
-    streams: Vec<Output>,
+    streams: Vec<(String, Output)>,
     recorder: Option<Output>,
     peak: (f32, f32),
     present: bool,
@@ -119,7 +119,7 @@ impl Engine {
             .unwrap()
             .sessions
             .get(&id)
-            .is_some_and(|s| s.streams.iter().any(|output| !output.finished()))
+            .is_some_and(|s| s.streams.iter().any(|(_, output)| !output.finished()))
     }
     pub fn recording(&self, id: u64) -> bool {
         self.mixer
@@ -154,23 +154,32 @@ impl Engine {
             .streams
             .iter()
             .enumerate()
-            .map(|(i, output)| format!("Sändare {} · {}", i + 1, output.status()))
+            .map(|(i, (label, output))| {
+                if label.is_empty() {
+                    format!("Sändare {} · {}", i + 1, output.status())
+                } else {
+                    format!("{label} · {}", output.status())
+                }
+            })
             .collect();
         if let Some(rec) = &s.recorder {
             statuses.push(rec.status())
         }
         statuses.join("   |   ")
     }
-    pub fn set_stream(&self, source: &Source, start: bool) {
+    pub fn set_stream(&self, source: &Source, destinations: &[Destination], start: bool) {
         let mut m = self.mixer.lock().unwrap();
         let s = m.sessions.entry(source.id).or_default();
         if !start {
             s.streams.clear();
-        } else if s.streams.iter().all(Output::finished) {
+        } else if s.streams.iter().all(|(_, output)| output.finished()) {
             s.streams = source
-                .destinations
-                .iter()
-                .map(|d| Output::stream(d, channel_count(source)))
+                .resolve_destinations(destinations)
+                .into_iter()
+                .map(|d| {
+                    let label = d.name.trim().to_owned();
+                    (label, Output::stream(d, channel_count(source)))
+                })
                 .collect();
         }
     }
@@ -227,7 +236,12 @@ impl Mixer {
                 peak.0.max(session.peak.0 * 0.93),
                 peak.1.max(session.peak.1 * 0.93),
             );
-            for output in session.streams.iter().chain(session.recorder.iter()) {
+            for output in session
+                .streams
+                .iter()
+                .map(|(_, output)| output)
+                .chain(session.recorder.iter())
+            {
                 output.push(&pcm);
             }
         }
