@@ -15,8 +15,8 @@ fn app_icon() -> Option<eframe::egui::IconData> {
 
 fn main() -> eframe::Result {
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([1000.0, 720.0])
-        .with_min_inner_size([730.0, 500.0]);
+        .with_inner_size([820.0, 720.0])
+        .with_min_inner_size([560.0, 480.0]);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }

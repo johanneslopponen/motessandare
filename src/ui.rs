@@ -7,6 +7,13 @@ use std::time::Duration;
 
 const ACCENT: Color32 = Color32::from_rgb(100, 217, 191);
 const WARNING: Color32 = Color32::from_rgb(246, 192, 113);
+const FILENAME_FORMATS: &[(&str, &str)] = &[
+    ("Namn – Datum – Tid", "{namn}-{datum}-{tid}"),
+    ("Datum – Tid – Namn", "{datum}-{tid}-{namn}"),
+    ("Datum – Namn", "{datum}-{namn}"),
+    ("Namn – Datum", "{namn}-{datum}"),
+    ("Namn – Unix-tid", "{namn}-{unix}"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -19,12 +26,11 @@ pub struct Ui {
     engine: Engine,
     settings: Settings,
     selected_source: Option<u64>,
-    selected_destination: Option<u64>,
     view: View,
     dirty: bool,
     notice: Option<String>,
     remove_source: bool,
-    remove_destination: bool,
+    remove_destination: Option<u64>,
     new_destination_draft: Option<Destination>,
     styled: bool,
     close_blocked: bool,
@@ -44,17 +50,15 @@ impl Ui {
         let engine = Engine::new();
         engine.update(&settings.sources);
         let selected_source = settings.sources.first().map(|source| source.id);
-        let selected_destination = settings.destinations.first().map(|dest| dest.id);
         Self {
             engine,
             settings,
             selected_source,
-            selected_destination,
             view: View::Overview,
             dirty: false,
             notice,
             remove_source: false,
-            remove_destination: false,
+            remove_destination: None,
             new_destination_draft: None,
             styled: false,
             close_blocked: false,
@@ -76,6 +80,7 @@ impl Ui {
         self.selected_source = Some(id);
         self.view = View::SourceSettings;
         self.remove_source = false;
+        self.remove_destination = None;
         self.new_destination_draft = None;
         self.dirty = true;
         self.engine.update(&self.settings.sources);
@@ -91,9 +96,8 @@ impl Ui {
             name: format!("Destination {id}"),
             ..Destination::default()
         });
-        self.selected_destination = Some(id);
         self.view = View::Destinations;
-        self.remove_destination = false;
+        self.remove_destination = None;
         self.new_destination_draft = None;
         self.dirty = true;
     }
@@ -119,94 +123,86 @@ impl Ui {
         ui.horizontal_wrapped(|ui| {
             ui.heading(RichText::new("Mötessändare").size(25.0));
             ui.separator();
-            ui.menu_button("Sändningar", |ui| {
-                let can_start = self.settings.sources.iter().any(|source| {
-                    !source.device.is_empty()
+            let can_start_streams = self.settings.sources.iter().any(|source| {
+                !source.device.is_empty()
+                    && !source
+                        .resolve_destinations(&self.settings.destinations)
+                        .is_empty()
+                    && !self.engine.streaming(source.id)
+            });
+            let can_stop_streams = self
+                .settings
+                .sources
+                .iter()
+                .any(|source| self.engine.streaming(source.id));
+            if ui
+                .add_enabled(
+                    can_start_streams,
+                    egui::Button::new("Starta alla sändningar"),
+                )
+                .clicked()
+            {
+                for source in &self.settings.sources {
+                    if !source.device.is_empty()
                         && !source
                             .resolve_destinations(&self.settings.destinations)
                             .is_empty()
                         && !self.engine.streaming(source.id)
-                });
-                let can_stop = self
-                    .settings
-                    .sources
-                    .iter()
-                    .any(|source| self.engine.streaming(source.id));
-                if ui
-                    .add_enabled(can_start, egui::Button::new("Starta alla sändningar"))
-                    .clicked()
-                {
-                    for source in &self.settings.sources {
-                        if !source.device.is_empty()
-                            && !source
-                                .resolve_destinations(&self.settings.destinations)
-                                .is_empty()
-                            && !self.engine.streaming(source.id)
-                        {
-                            self.engine
-                                .set_stream(source, &self.settings.destinations, true);
-                        }
+                    {
+                        self.engine
+                            .set_stream(source, &self.settings.destinations, true);
                     }
-                    ui.close_menu();
                 }
-                if ui
-                    .add_enabled(can_stop, egui::Button::new("Stoppa alla sändningar"))
-                    .clicked()
-                {
-                    for source in &self.settings.sources {
-                        if self.engine.streaming(source.id) {
-                            self.engine
-                                .set_stream(source, &self.settings.destinations, false);
-                        }
-                    }
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("Inspelningar", |ui| {
-                let can_start = self.settings.sources.iter().any(|source| {
-                    !source.device.is_empty()
-                        && !source.recording.folder.trim().is_empty()
-                        && !self.engine.recording(source.id)
-                });
-                let can_stop = self
-                    .settings
-                    .sources
-                    .iter()
-                    .any(|source| self.engine.recording(source.id));
-                if ui
-                    .add_enabled(can_start, egui::Button::new("Starta alla inspelningar"))
-                    .clicked()
-                {
-                    for source in &self.settings.sources {
-                        if !source.device.is_empty()
-                            && !source.recording.folder.trim().is_empty()
-                            && !self.engine.recording(source.id)
-                        {
-                            self.engine.set_record(source, true);
-                        }
-                    }
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(can_stop, egui::Button::new("Stoppa alla inspelningar"))
-                    .clicked()
-                {
-                    for source in &self.settings.sources {
-                        if self.engine.recording(source.id) {
-                            self.engine.set_record(source, false);
-                        }
-                    }
-                    ui.close_menu();
-                }
-            });
+            }
             if ui
-                .add_enabled(self.dirty, egui::Button::new("Spara inställningar"))
+                .add_enabled(can_stop_streams, egui::Button::new("Stoppa alla sändningar"))
                 .clicked()
             {
-                self.save();
+                for source in &self.settings.sources {
+                    if self.engine.streaming(source.id) {
+                        self.engine
+                            .set_stream(source, &self.settings.destinations, false);
+                    }
+                }
             }
-            if self.dirty {
-                ui.label(RichText::new("Osparade ändringar").color(WARNING));
+            let can_start_recordings = self.settings.sources.iter().any(|source| {
+                !source.device.is_empty()
+                    && !source.recording.folder.trim().is_empty()
+                    && !self.engine.recording(source.id)
+            });
+            let can_stop_recordings = self
+                .settings
+                .sources
+                .iter()
+                .any(|source| self.engine.recording(source.id));
+            if ui
+                .add_enabled(
+                    can_start_recordings,
+                    egui::Button::new("Starta alla inspelningar"),
+                )
+                .clicked()
+            {
+                for source in &self.settings.sources {
+                    if !source.device.is_empty()
+                        && !source.recording.folder.trim().is_empty()
+                        && !self.engine.recording(source.id)
+                    {
+                        self.engine.set_record(source, true);
+                    }
+                }
+            }
+            if ui
+                .add_enabled(
+                    can_stop_recordings,
+                    egui::Button::new("Stoppa alla inspelningar"),
+                )
+                .clicked()
+            {
+                for source in &self.settings.sources {
+                    if self.engine.recording(source.id) {
+                        self.engine.set_record(source, false);
+                    }
+                }
             }
         });
         if let Some(message) = &self.notice {
@@ -215,8 +211,6 @@ impl Ui {
                 match settings_load() {
                     Ok(settings) => {
                         self.selected_source = settings.sources.first().map(|source| source.id);
-                        self.selected_destination =
-                            settings.destinations.first().map(|dest| dest.id);
                         self.settings = settings;
                         self.engine.update(&self.settings.sources);
                         self.load_blocked = false;
@@ -256,96 +250,38 @@ impl eframe::App for Ui {
             ui.add_space(6.0);
         });
 
-        egui::SidePanel::left("sources")
-            .default_width(224.0)
-            .width_range(170.0..=360.0)
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Ljudkällor");
-                    if ui
-                        .add_enabled(
-                            !self.load_blocked,
-                            egui::Button::new("+ Lägg till ljudkälla"),
-                        )
-                        .clicked()
-                    {
-                        self.add_source();
-                    }
-                    ui.add_space(4.0);
-                    for source in &self.settings.sources {
-                        let name = display_name(source);
-                        let selected = self.view != View::Destinations
-                            && self.selected_source == Some(source.id);
-                        if ui.selectable_label(selected, name).clicked() {
-                            self.selected_source = Some(source.id);
-                            self.view = View::SourceSettings;
-                            self.remove_source = false;
-                            self.new_destination_draft = None;
-                        }
-                    }
-
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    ui.heading("Destinationer");
-                    if ui
-                        .add_enabled(
-                            !self.load_blocked,
-                            egui::Button::new("+ Lägg till destination"),
-                        )
-                        .clicked()
-                    {
-                        self.add_destination();
-                    }
-                    ui.add_space(4.0);
-                    for dest in &self.settings.destinations {
-                        let selected = self.view == View::Destinations
-                            && self.selected_destination == Some(dest.id);
-                        if ui
-                            .selectable_label(selected, dest.display_name())
-                            .clicked()
-                        {
-                            self.selected_destination = Some(dest.id);
-                            self.view = View::Destinations;
-                            self.remove_destination = false;
-                            self.new_destination_draft = None;
-                        }
-                    }
-                });
-            });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.load_blocked {
                 return;
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .selectable_value(&mut self.view, View::Overview, "Översikt")
                     .clicked()
                 {
-                    self.new_destination_draft = None;
-                }
-                if ui
-                    .selectable_value(&mut self.view, View::SourceSettings, "Inställningar")
-                    .clicked()
-                {
-                    if self.selected_source.is_none() {
-                        self.selected_source = self.settings.sources.first().map(|s| s.id);
-                    }
                     self.remove_source = false;
+                    self.remove_destination = None;
+                    self.new_destination_draft = None;
                 }
                 if ui
                     .selectable_value(&mut self.view, View::Destinations, "Destinationer")
                     .clicked()
                 {
-                    if self.selected_destination.is_none() {
-                        self.selected_destination =
-                            self.settings.destinations.first().map(|d| d.id);
-                    }
-                    self.remove_destination = false;
+                    self.remove_source = false;
+                    self.remove_destination = None;
                     self.new_destination_draft = None;
+                }
+                if ui.button("+ Lägg till ljudkälla").clicked() {
+                    self.add_source();
+                }
+                if ui
+                    .add_enabled(self.dirty, egui::Button::new("Spara inställningar"))
+                    .clicked()
+                {
+                    self.save();
+                }
+                if self.dirty {
+                    ui.label(RichText::new("Osparade ändringar").color(WARNING));
                 }
             });
             ui.separator();
@@ -390,7 +326,7 @@ impl eframe::App for Ui {
                         .iter()
                         .position(|source| Some(source.id) == self.selected_source)
                     else {
-                        empty_sources_view(ui, || self.add_source());
+                        self.view = View::Overview;
                         return;
                     };
                     let source_id = self.settings.sources[index].id;
@@ -451,10 +387,9 @@ impl eframe::App for Ui {
                                 }
                             });
                         });
-                    if let Some(dest_id) = outcome.edit_destination {
-                        self.selected_destination = Some(dest_id);
+                    if outcome.open_destinations {
                         self.view = View::Destinations;
-                        self.remove_destination = false;
+                        self.remove_destination = None;
                         self.new_destination_draft = None;
                     }
                     if removed {
@@ -465,6 +400,7 @@ impl eframe::App for Ui {
                             .get(index)
                             .or_else(|| self.settings.sources.last())
                             .map(|source| source.id);
+                        self.view = View::Overview;
                         self.remove_source = false;
                         self.new_destination_draft = None;
                     }
@@ -474,12 +410,7 @@ impl eframe::App for Ui {
                     }
                 }
                 View::Destinations => {
-                    let Some(index) = self
-                        .settings
-                        .destinations
-                        .iter()
-                        .position(|dest| Some(dest.id) == self.selected_destination)
-                    else {
+                    if self.settings.destinations.is_empty() {
                         ui.vertical_centered(|ui| {
                             ui.add_space(60.0);
                             ui.heading("Lägg till en destination");
@@ -491,75 +422,96 @@ impl eframe::App for Ui {
                             }
                         });
                         return;
-                    };
-                    let dest_id = self.settings.destinations[index].id;
-                    let used_by: Vec<String> = self
-                        .settings
-                        .sources
-                        .iter()
-                        .filter(|source| source.destination_ids.contains(&dest_id))
-                        .map(|source| display_name(source).to_owned())
-                        .collect();
-                    let in_use_streaming = self.destination_streaming(dest_id);
+                    }
                     let mut changed = false;
-                    let mut removed = false;
+                    let mut remove_id: Option<u64> = None;
+                    let mut add_new = false;
                     ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let dest = &mut self.settings.destinations[index];
-                            ui.heading(dest.display_name());
-                            if used_by.is_empty() {
-                                ui.weak("Används inte av någon ljudkälla ännu.");
-                            } else {
-                                ui.weak(format!("Används av: {}", used_by.join(", ")));
-                            }
-                            if in_use_streaming {
-                                ui.label(
-                                    RichText::new(
-                                        "Stoppa pågående sändningar som använder den här destinationen för att ändra inställningarna.",
-                                    )
-                                    .color(WARNING),
-                                );
-                            }
-                            ui.add_enabled_ui(!in_use_streaming, |ui| {
-                                changed |= ui
-                                    .push_id(dest.id, |ui| destination_settings(ui, dest))
-                                    .inner;
-                                ui.separator();
-                                if self.remove_destination {
-                                    ui.horizontal_wrapped(|ui| {
-                                        let prompt = match used_by.len() {
-                                            0 => "Ta bort den här destinationen?".to_owned(),
-                                            1 => "Ta bort den här destinationen? Den tas även bort från 1 ljudkälla.".to_owned(),
-                                            count => format!(
-                                                "Ta bort den här destinationen? Den tas även bort från {count} ljudkällor."
-                                            ),
-                                        };
-                                        ui.label(prompt);
-                                        removed = ui.button("Ta bort").clicked();
-                                        if ui.button("Avbryt").clicked() {
-                                            self.remove_destination = false;
-                                        }
-                                    });
-                                } else if ui.button("Ta bort destination").clicked() {
-                                    self.remove_destination = true;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.heading("Sparade destinationer");
+                                if ui.button("+ Lägg till destination").clicked() {
+                                    add_new = true;
                                 }
                             });
+                            ui.add_space(4.0);
+                            for index in 0..self.settings.destinations.len() {
+                                let dest_id = self.settings.destinations[index].id;
+                                let used_by: Vec<String> = self
+                                    .settings
+                                    .sources
+                                    .iter()
+                                    .filter(|source| source.destination_ids.contains(&dest_id))
+                                    .map(|source| display_name(source).to_owned())
+                                    .collect();
+                                let in_use_streaming = self.destination_streaming(dest_id);
+                                ui.push_id(dest_id, |ui| {
+                                    Frame::group(ui.style()).show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        let dest = &mut self.settings.destinations[index];
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(dest.display_name());
+                                            ui.weak(if used_by.is_empty() {
+                                                "Används inte av någon ljudkälla".to_owned()
+                                            } else {
+                                                format!("Används av: {}", used_by.join(", "))
+                                            });
+                                        });
+                                        if in_use_streaming {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Stoppa pågående sändningar som använder den här destinationen för att ändra inställningarna.",
+                                                )
+                                                .color(WARNING),
+                                            );
+                                        }
+                                        ui.add_enabled_ui(!in_use_streaming, |ui| {
+                                            changed |= destination_settings(ui, dest);
+                                            ui.add_space(4.0);
+                                            if self.remove_destination == Some(dest_id) {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let prompt = match used_by.len() {
+                                                        0 => "Ta bort den här destinationen?"
+                                                            .to_owned(),
+                                                        1 => "Ta bort den här destinationen? Den tas även bort från 1 ljudkälla."
+                                                            .to_owned(),
+                                                        count => format!(
+                                                            "Ta bort den här destinationen? Den tas även bort från {count} ljudkällor."
+                                                        ),
+                                                    };
+                                                    ui.label(prompt);
+                                                    if ui.button("Ta bort").clicked() {
+                                                        remove_id = Some(dest_id);
+                                                    }
+                                                    if ui.button("Avbryt").clicked() {
+                                                        self.remove_destination = None;
+                                                    }
+                                                });
+                                            } else if ui.small_button("Ta bort destination").clicked()
+                                            {
+                                                self.remove_destination = Some(dest_id);
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.add_space(6.0);
+                            }
                         });
-                    if removed {
-                        self.settings.destinations.remove(index);
+                    if add_new {
+                        self.add_destination();
+                    }
+                    if let Some(dest_id) = remove_id {
+                        self.settings
+                            .destinations
+                            .retain(|dest| dest.id != dest_id);
                         for source in &mut self.settings.sources {
                             source.destination_ids.retain(|id| *id != dest_id);
                         }
-                        self.selected_destination = self
-                            .settings
-                            .destinations
-                            .get(index)
-                            .or_else(|| self.settings.destinations.last())
-                            .map(|dest| dest.id);
-                        self.remove_destination = false;
+                        self.remove_destination = None;
+                        changed = true;
                     }
-                    if changed || removed {
+                    if changed {
                         self.dirty = true;
                         self.engine.update(&self.settings.sources);
                     }
@@ -739,7 +691,7 @@ fn meter(ui: &mut EguiUi, label: &str, signal: f32) {
 #[derive(Default)]
 struct SourceSettingsOutcome {
     changed: bool,
-    edit_destination: Option<u64>,
+    open_destinations: bool,
 }
 
 fn source_settings(
@@ -779,16 +731,16 @@ fn source_settings(
                         ui.selectable_value(&mut device, id.clone(), name);
                     }
                 });
-            if device != source.device {
-                if let Some((_, name, count)) = devices.iter().find(|(id, _, _)| id == &device) {
-                    source.device = device;
-                    source.device_name.clone_from(name);
-                    source.left = source.left.min(count.saturating_sub(1));
-                    source.right = source
-                        .right
-                        .filter(|right| *right < *count && *right != source.left);
-                    outcome.changed = true;
-                }
+            if device != source.device
+                && let Some((_, name, count)) = devices.iter().find(|(id, _, _)| id == &device)
+            {
+                source.device = device;
+                source.device_name.clone_from(name);
+                source.left = source.left.min(count.saturating_sub(1));
+                source.right = source
+                    .right
+                    .filter(|right| *right < *count && *right != source.left);
+                outcome.changed = true;
             }
             ui.end_row();
             let count = devices
@@ -878,7 +830,7 @@ fn source_settings(
                         replace_slot = Some((slot_index, chosen));
                     }
                     if ui.small_button("Redigera").clicked() {
-                        outcome.edit_destination = Some(dest_id);
+                        outcome.open_destinations = true;
                     }
                     if ui.small_button("Ta bort").clicked() {
                         remove_slot = Some(slot_index);
@@ -977,6 +929,45 @@ fn source_settings(
         .num_columns(2)
         .show(ui, |ui| {
             outcome.changed |= field(ui, "Mapp", &mut source.recording.folder, false);
+            ui.label("Filnamnsformat");
+            let current_preset = FILENAME_FORMATS
+                .iter()
+                .find(|(_, template)| *template == source.recording.filename_format)
+                .map_or("Anpassat", |(label, _)| *label);
+            ComboBox::from_id_salt("filename-format")
+                .width(260.0)
+                .selected_text(current_preset)
+                .show_ui(ui, |ui| {
+                    for &(label, template) in FILENAME_FORMATS {
+                        if ui
+                            .selectable_label(source.recording.filename_format == template, label)
+                            .clicked()
+                        {
+                            source.recording.filename_format = template.to_owned();
+                            outcome.changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+            let template_label = ui.label("Filnamnsmall").id;
+            outcome.changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut source.recording.filename_format)
+                        .desired_width(260.0),
+                )
+                .labelled_by(template_label)
+                .on_hover_text(
+                    "Platshållare: {namn}, {datum}, {tid}, {år}, {månad}, {dag}, {timme}, {minut}, {sekund}, {unix}",
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Exempel");
+            ui.weak(crate::output::preview_recording_filename(
+                &source.recording.filename_format,
+                &source.name,
+                &source.recording.format,
+            ));
+            ui.end_row();
             ui.label("Filformat");
             let was_lossy = bitrate_range(&source.recording.format).is_some();
             let format_changed = choice(

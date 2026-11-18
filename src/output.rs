@@ -64,11 +64,21 @@ impl Output {
 
     pub fn record(settings: &Recording, name: &str, channels: u16) -> Self {
         let folder = PathBuf::from(&settings.folder);
+        let filename_format = settings.filename_format.clone();
         let format = settings.format.clone();
         let quality = settings.quality;
         let name = name.to_owned();
         Self::start(128, move |receiver, state| {
-            run_record(&folder, &name, &format, quality, channels, receiver, &state);
+            run_record(
+                &folder,
+                &filename_format,
+                &name,
+                &format,
+                quality,
+                channels,
+                receiver,
+                &state,
+            );
         })
     }
 
@@ -279,6 +289,7 @@ fn run_stream(mut command: Command, mut receiver: Receiver<Vec<f32>>, state: &St
 
 fn run_record(
     folder: &Path,
+    filename_format: &str,
     name: &str,
     format: &str,
     quality: u32,
@@ -304,7 +315,7 @@ fn run_record(
             return;
         }
     };
-    let path = match reserve_recording_path(folder, name, extension) {
+    let path = match reserve_recording_path(folder, filename_format, name, extension) {
         Ok(path) => path,
         Err(error) => {
             state.set_status(format!("Kunde inte skapa inspelningsfilen: {error}"));
@@ -342,15 +353,134 @@ fn run_record(
     }
 }
 
-fn reserve_recording_path(folder: &Path, name: &str, extension: &str) -> io::Result<PathBuf> {
-    let folder = if folder.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        folder
-    };
-    fs::create_dir_all(folder)?;
-    let folder = std::path::absolute(folder)?;
-    let safe_name: String = name
+#[derive(Clone, Copy)]
+struct LocalDateTime {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    unix: u64,
+}
+
+fn local_now() -> LocalDateTime {
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct WinSystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            milliseconds: u16,
+        }
+        unsafe extern "system" {
+            fn GetLocalTime(lp_system_time: *mut WinSystemTime);
+        }
+        let mut st = WinSystemTime {
+            year: 0,
+            month: 0,
+            day_of_week: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            milliseconds: 0,
+        };
+        unsafe { GetLocalTime(&mut st) };
+        return LocalDateTime {
+            year: i32::from(st.year),
+            month: u32::from(st.month),
+            day: u32::from(st.day),
+            hour: u32::from(st.hour),
+            minute: u32::from(st.minute),
+            second: u32::from(st.second),
+            unix,
+        };
+    }
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Tm {
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
+            tm_isdst: i32,
+            _pad: [usize; 8],
+        }
+        unsafe extern "C" {
+            fn localtime_r(timep: *const isize, result: *mut Tm) -> *mut Tm;
+        }
+        let t = unix as isize;
+        let mut tm = Tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            _pad: [0; 8],
+        };
+        let ptr = unsafe { localtime_r(&t, &mut tm) };
+        if !ptr.is_null() {
+            return LocalDateTime {
+                year: tm.tm_year + 1900,
+                month: (tm.tm_mon + 1).max(1) as u32,
+                day: tm.tm_mday.max(1) as u32,
+                hour: tm.tm_hour.max(0) as u32,
+                minute: tm.tm_min.max(0) as u32,
+                second: tm.tm_sec.max(0) as u32,
+                unix,
+            };
+        }
+    }
+    #[allow(unreachable_code)]
+    utc_from_unix(unix)
+}
+
+#[allow(dead_code)]
+fn utc_from_unix(unix: u64) -> LocalDateTime {
+    let days = (unix / 86_400) as i64;
+    let secs = (unix % 86_400) as u32;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = (y + i64::from(month <= 2)) as i32;
+    LocalDateTime {
+        year,
+        month,
+        day,
+        hour: secs / 3600,
+        minute: (secs % 3600) / 60,
+        second: secs % 60,
+        unix,
+    }
+}
+
+fn sanitize_source_name(name: &str) -> String {
+    let safe: String = name
         .chars()
         .take(64)
         .map(|ch| {
@@ -361,17 +491,87 @@ fn reserve_recording_path(folder: &Path, name: &str, extension: &str) -> io::Res
             }
         })
         .collect();
-    let name = safe_name.trim_matches('-');
-    let name = if name.is_empty() { "inspelning" } else { name };
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    for suffix in 0.. {
-        let path = folder.join(format!(
-            "{name}-{}-{:03}-{suffix}.{extension}",
-            stamp.as_secs(),
-            stamp.subsec_millis()
-        ));
+    let trimmed = safe.trim_matches('-');
+    if trimmed.is_empty() {
+        "inspelning".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn format_recording_stem(template: &str, name: &str, now: LocalDateTime) -> String {
+    let template = if template.trim().is_empty() {
+        crate::settings::DEFAULT_FILENAME_FORMAT
+    } else {
+        template.trim()
+    };
+    let safe_name = sanitize_source_name(name);
+    let date = format!("{:04}-{:02}-{:02}", now.year, now.month, now.day);
+    let time = format!("{:02}-{:02}-{:02}", now.hour, now.minute, now.second);
+    let rendered = template
+        .replace("{namn}", &safe_name)
+        .replace("{datum}", &date)
+        .replace("{tid}", &time)
+        .replace("{år}", &format!("{:04}", now.year))
+        .replace("{månad}", &format!("{:02}", now.month))
+        .replace("{dag}", &format!("{:02}", now.day))
+        .replace("{timme}", &format!("{:02}", now.hour))
+        .replace("{minut}", &format!("{:02}", now.minute))
+        .replace("{sekund}", &format!("{:02}", now.second))
+        .replace("{unix}", &now.unix.to_string());
+    let sanitized: String = rendered
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .take(128)
+        .collect();
+    let trimmed = sanitized.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
+    if trimmed.is_empty() {
+        "inspelning".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+pub fn preview_recording_filename(template: &str, name: &str, format: &str) -> String {
+    let extension = match format {
+        "WAV" => "wav",
+        "FLAC" => "flac",
+        "Opus" => "opus",
+        "MP3" => "mp3",
+        _ => "flac",
+    };
+    let stem = format_recording_stem(template, name, local_now());
+    format!("{stem}.{extension}")
+}
+
+fn reserve_recording_path(
+    folder: &Path,
+    filename_format: &str,
+    name: &str,
+    extension: &str,
+) -> io::Result<PathBuf> {
+    let folder = if folder.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        folder
+    };
+    fs::create_dir_all(folder)?;
+    let folder = std::path::absolute(folder)?;
+    let stem = format_recording_stem(filename_format, name, local_now());
+    for suffix in 0u32.. {
+        let filename = if suffix == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}-{}.{extension}", suffix + 1)
+        };
+        let path = folder.join(filename);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,

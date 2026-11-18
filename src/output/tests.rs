@@ -97,6 +97,7 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
                 folder: folder.path().display().to_string(),
                 format: (*format).into(),
                 quality: *quality,
+                ..Recording::default()
             };
             Output::record(&settings, "Källa", 1)
         })
@@ -161,4 +162,53 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
             "{format}: {rms} vs {expected}"
         );
     }
+}
+
+#[test]
+fn formats_recording_filename_with_placeholders_and_sanitization() {
+    let dt = LocalDateTime {
+        year: 2026,
+        month: 11,
+        day: 5,
+        hour: 9,
+        minute: 4,
+        second: 7,
+        unix: 1_793_869_447,
+    };
+    assert_eq!(
+        format_recording_stem("{namn}-{datum}-{tid}", "Sal A / Möte", dt),
+        "Sal-A---Möte-2026-11-05-09-04-07"
+    );
+    assert_eq!(
+        format_recording_stem(
+            "{år}_{månad}_{dag}_{timme}{minut}{sekund}_{namn}",
+            "Källa 1",
+            dt
+        ),
+        "2026_11_05_090407_Källa-1"
+    );
+    assert_eq!(
+        format_recording_stem("{namn}-{unix}", "Källa 1", dt),
+        "Källa-1-1793869447"
+    );
+    assert_eq!(
+        format_recording_stem("   ", "Källa 1", dt),
+        "Källa-1-2026-11-05-09-04-07"
+    );
+    assert_eq!(
+        format_recording_stem("../farlig:fil*namn?", "Källa", dt),
+        "-farlig-fil-namn-"
+    );
+    assert_eq!(format_recording_stem("...", "Källa", dt), "inspelning");
+}
+
+#[test]
+fn reserve_recording_path_avoids_overwriting_existing_files() {
+    let folder = tempfile::tempdir().unwrap();
+    let first = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
+    let second = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
+    let third = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
+    assert_eq!(first.file_name().unwrap(), "mote-Sal-1.flac");
+    assert_eq!(second.file_name().unwrap(), "mote-Sal-1-2.flac");
+    assert_eq!(third.file_name().unwrap(), "mote-Sal-1-3.flac");
 }
