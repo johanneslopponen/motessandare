@@ -6,9 +6,12 @@ use eframe::egui::{
 };
 use std::f32::consts::PI;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const STRONG_FONT: &str = "strong";
+const SAVED_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+const SAVE_SHORTCUT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
 const FILENAME_FORMATS: &[(&str, &str)] = &[
     ("Namn – Datum – Tid", "{namn}-{datum}-{tid}"),
@@ -189,6 +192,7 @@ pub struct Ui {
     selected_source: Option<u64>,
     view: View,
     dirty: bool,
+    saved_at: Option<Instant>,
     notice: Option<String>,
     remove_source: bool,
     remove_destination: Option<u64>,
@@ -229,6 +233,7 @@ impl Ui {
             selected_source,
             view: View::Overview,
             dirty: false,
+            saved_at: None,
             notice,
             remove_source: false,
             remove_destination: None,
@@ -290,8 +295,36 @@ impl Ui {
                 self.notice = None;
                 self.dirty = false;
                 self.close_blocked = false;
+                self.saved_at = Some(Instant::now());
             }
             Err(err) => self.notice = Some(format!("Inställningarna kunde inte sparas. {err}")),
+        }
+    }
+
+    fn saved_feedback_remaining(&mut self) -> Option<Duration> {
+        let remaining = self.saved_at.and_then(|at| {
+            if self.dirty {
+                None
+            } else {
+                SAVED_FEEDBACK_DURATION.checked_sub(at.elapsed())
+            }
+        });
+        if remaining.is_none() {
+            self.saved_at = None;
+        }
+        remaining
+    }
+
+    fn repaint_interval(&self) -> Duration {
+        let active = self.settings.sources.iter().any(|source| {
+            self.engine.present(source.id)
+                || self.engine.streaming(source.id)
+                || self.engine.recording(source.id)
+        });
+        if active {
+            Duration::from_millis(65)
+        } else {
+            Duration::from_millis(500)
         }
     }
 
@@ -636,6 +669,13 @@ impl eframe::App for Ui {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let palette = Palette::for_theme(ctx.style().visuals.dark_mode);
 
+        if !self.load_blocked
+            && ctx.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
+            && self.dirty
+        {
+            self.save();
+        }
+
         egui::TopBottomPanel::top("header")
             .frame(
                 Frame::new()
@@ -711,6 +751,20 @@ impl eframe::App for Ui {
                             self.save();
                         }
 
+                        if self.dirty {
+                            ui.label(
+                                RichText::new("Osparade ändringar")
+                                    .size(12.5)
+                                    .color(palette.warning),
+                            );
+                        } else if self.saved_feedback_remaining().is_some() {
+                            ui.label(
+                                RichText::new("Sparat ✓")
+                                    .size(12.5)
+                                    .color(palette.stream_accent),
+                            );
+                        }
+
                         if self.view != View::Destinations
                             && action_button(
                                 ui,
@@ -724,14 +778,6 @@ impl eframe::App for Ui {
                             .clicked()
                         {
                             self.add_source();
-                        }
-
-                        if self.dirty {
-                            ui.label(
-                                RichText::new("Osparade ändringar")
-                                    .size(12.5)
-                                    .color(palette.warning),
-                            );
                         }
                     });
                 });
@@ -1023,7 +1069,7 @@ impl eframe::App for Ui {
                                             }
                                             ui.add_space(4.0);
                                             ui.add_enabled_ui(!in_use_streaming, |ui| {
-                                                changed |= destination_settings(ui, dest);
+                                                changed |= destination_settings(ui, dest, palette);
                                                 ui.add_space(6.0);
                                                 if self.remove_destination == Some(dest_id) {
                                                     ui.horizontal_wrapped(|ui| {
@@ -1112,7 +1158,11 @@ impl eframe::App for Ui {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
         }
-        ctx.request_repaint_after(Duration::from_millis(65));
+        let mut repaint_after = self.repaint_interval();
+        if let Some(remaining) = self.saved_feedback_remaining() {
+            repaint_after = repaint_after.min(remaining);
+        }
+        ctx.request_repaint_after(repaint_after);
     }
 }
 
@@ -2489,7 +2539,7 @@ fn source_settings(
                     ));
                     ui.add_space(4.0);
                     ui.push_id("new-dest-draft", |ui| {
-                        destination_settings(ui, draft);
+                        destination_settings(ui, draft, palette);
                     });
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -2630,7 +2680,11 @@ fn source_settings(
     outcome
 }
 
-fn destination_settings(ui: &mut EguiUi, destination: &mut Destination) -> bool {
+fn destination_settings(
+    ui: &mut EguiUi,
+    destination: &mut Destination,
+    palette: Palette,
+) -> bool {
     let mut changed = false;
     egui::Grid::new("destination-fields")
         .num_columns(2)
@@ -2640,7 +2694,27 @@ fn destination_settings(ui: &mut EguiUi, destination: &mut Destination) -> bool 
             changed |= field(ui, "Server-URL", &mut destination.server, false);
             changed |= field(ui, "Monteringspunkt", &mut destination.mount, false);
             changed |= field(ui, "Användarnamn", &mut destination.user, false);
-            changed |= field(ui, "Lösenord", &mut destination.password, true);
+            let password_label = ui.label("Lösenord").id;
+            let show_id = ui.make_persistent_id("show-password");
+            let mut show_password =
+                ui.data(|data| data.get_temp::<bool>(show_id).unwrap_or(false));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut destination.password)
+                            .password(!show_password)
+                            .desired_width(210.0),
+                    )
+                    .labelled_by(password_label)
+                    .changed();
+                let toggle_label = if show_password { "Dölj" } else { "Visa" };
+                if compact_button(ui, toggle_label, true, None, palette).clicked() {
+                    show_password = !show_password;
+                    ui.data_mut(|data| data.insert_temp(show_id, show_password));
+                }
+            });
+            ui.end_row();
             ui.label("Kodek");
             let codec_changed = choice(ui, "codec", &mut destination.codec, &["Opus", "MP3"]);
             changed |= codec_changed;
