@@ -2124,11 +2124,28 @@ fn source_card(
     open_settings
 }
 
+const METER_TICKS_DB: &[f32] = &[-60.0, -40.0, -20.0, -12.0, -6.0, 0.0];
+
 fn meter_fraction(signal: f32) -> f32 {
     if signal.is_finite() && signal > 0.0 {
         (1.0 + signal.log10() / 3.0).clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+fn meter_color(signal: f32, palette: Palette) -> Color32 {
+    let db = if signal.is_finite() && signal > 0.0 {
+        20.0 * signal.log10()
+    } else {
+        f32::NEG_INFINITY
+    };
+    if db > -3.0 {
+        palette.meter_peak
+    } else if db >= -18.0 {
+        palette.meter_warn
+    } else {
+        palette.meter_ok
     }
 }
 
@@ -2159,14 +2176,26 @@ fn meter(ui: &mut EguiUi, label: &str, signal: f32, palette: Palette) {
         if frac > 0.002 {
             let fill_w = (bar_rect.width() * frac).max(6.0).min(bar_rect.width());
             let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(fill_w, bar_rect.height()));
-            let fill_color = if signal >= 0.95 {
-                palette.meter_peak
-            } else if signal >= 0.5 {
-                palette.meter_warn
+            painter.rect_filled(fill_rect, rounding, meter_color(signal, palette));
+        }
+
+        for &tick_db in METER_TICKS_DB {
+            let tick_signal = 10.0_f32.powf(tick_db / 20.0);
+            let tick_frac = meter_fraction(tick_signal);
+            let x = (bar_rect.left() + bar_rect.width() * tick_frac)
+                .clamp(bar_rect.left() + 1.5, bar_rect.right() - 1.5);
+            let tick_color = if frac > 0.002 && tick_frac <= frac {
+                palette.meter_track.gamma_multiply(0.65)
             } else {
-                palette.meter_ok
+                palette.text_disabled.gamma_multiply(0.55)
             };
-            painter.rect_filled(fill_rect, rounding, fill_color);
+            painter.line_segment(
+                [
+                    Pos2::new(x, bar_rect.top() + 1.5),
+                    Pos2::new(x, bar_rect.bottom() - 1.5),
+                ],
+                Stroke::new(1.0, tick_color),
+            );
         }
 
         let text = if signal.is_finite() && signal >= 0.001 {
