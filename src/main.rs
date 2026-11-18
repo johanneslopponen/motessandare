@@ -27,7 +27,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Mötessändare",
         options,
-        Box::new(|_| Ok(Box::new(ui::Ui::new()))),
+        Box::new(|cc| Ok(Box::new(ui::Ui::new(&cc.egui_ctx)))),
     )
 }
 
