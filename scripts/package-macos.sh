@@ -124,6 +124,7 @@ app="$work/Mötessändare.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Licenser"
 install -m 755 "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/motessandare" "$app/Contents/MacOS/motessandare"
 install -m 755 "$encoder" "$app/Contents/MacOS/ffmpeg"
+install -m 644 "$root/assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 licenses="$app/Contents/Resources/Licenser"
 cp "$work/ffmpeg-$ffmpeg/COPYING.LGPLv3" "$licenses/FFmpeg-LGPLv3.txt"
 cp "$work/ffmpeg-$ffmpeg/COPYING.GPLv3" "$licenses/FFmpeg-GPLv3.txt"
@@ -144,6 +145,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleDevelopmentRegion</key><string>sv</string>
     <key>CFBundleDisplayName</key><string>Mötessändare</string>
     <key>CFBundleExecutable</key><string>motessandare</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>se.motessandare.app</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Mötessändare</string>
