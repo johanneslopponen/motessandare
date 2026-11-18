@@ -418,7 +418,10 @@ impl Ui {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&message).color(palette.warning));
-                if self.load_blocked && ui.button("Läs in igen").clicked() {
+                if self.load_blocked
+                    && text_button(ui, "Läs in igen", true, ButtonVariant::Neutral, palette)
+                        .clicked()
+                {
                     match settings_load() {
                         Ok(settings) => {
                             self.selected_source = settings.sources.first().map(|source| source.id);
@@ -433,7 +436,16 @@ impl Ui {
                         }
                     }
                 }
-                if self.close_blocked && ui.button("Stäng utan att spara").clicked() {
+                if self.close_blocked
+                    && text_button(
+                        ui,
+                        "Stäng utan att spara",
+                        true,
+                        ButtonVariant::Neutral,
+                        palette,
+                    )
+                    .clicked()
+                {
                     self.dirty = false;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -595,7 +607,7 @@ impl eframe::App for Ui {
                         let mut go_overview = false;
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            if ui.button("← Översikt").clicked() {
+                            if compact_button(ui, "← Översikt", true, None, palette).clicked() {
                                 go_overview = true;
                             }
                             ui.label(
@@ -669,17 +681,36 @@ impl eframe::App for Ui {
                                                     RichText::new("Ta bort den här ljudkällan?")
                                                         .color(palette.danger),
                                                 );
-                                                removed = ui.button("Ta bort").clicked();
-                                                if ui.button("Avbryt").clicked() {
+                                                removed = action_button(
+                                                    ui,
+                                                    None,
+                                                    "Ta bort",
+                                                    true,
+                                                    Color32::WHITE,
+                                                    ButtonVariant::Danger,
+                                                    palette,
+                                                )
+                                                .clicked();
+                                                if text_button(
+                                                    ui,
+                                                    "Avbryt",
+                                                    true,
+                                                    ButtonVariant::Neutral,
+                                                    palette,
+                                                )
+                                                .clicked()
+                                                {
                                                     self.remove_source = false;
                                                 }
                                             });
-                                        } else if ui
-                                            .button(
-                                                RichText::new("Ta bort ljudkälla")
-                                                    .color(palette.danger),
-                                            )
-                                            .clicked()
+                                        } else if neutral_button_colored(
+                                            ui,
+                                            "Ta bort ljudkälla",
+                                            true,
+                                            palette.danger,
+                                            palette,
+                                        )
+                                        .clicked()
                                         {
                                             self.remove_source = true;
                                         }
@@ -831,19 +862,39 @@ impl eframe::App for Ui {
                                                             RichText::new(prompt)
                                                                 .color(palette.danger),
                                                         );
-                                                        if ui.button("Ta bort").clicked() {
+                                                        if action_button(
+                                                            ui,
+                                                            None,
+                                                            "Ta bort",
+                                                            true,
+                                                            Color32::WHITE,
+                                                            ButtonVariant::Danger,
+                                                            palette,
+                                                        )
+                                                        .clicked()
+                                                        {
                                                             remove_id = Some(dest_id);
                                                         }
-                                                        if ui.button("Avbryt").clicked() {
+                                                        if text_button(
+                                                            ui,
+                                                            "Avbryt",
+                                                            true,
+                                                            ButtonVariant::Neutral,
+                                                            palette,
+                                                        )
+                                                        .clicked()
+                                                        {
                                                             self.remove_destination = None;
                                                         }
                                                     });
-                                                } else if ui
-                                                    .small_button(
-                                                        RichText::new("Ta bort destination")
-                                                            .color(palette.danger),
-                                                    )
-                                                    .clicked()
+                                                } else if compact_button(
+                                                    ui,
+                                                    "Ta bort destination",
+                                                    true,
+                                                    Some(palette.danger),
+                                                    palette,
+                                                )
+                                                .clicked()
                                                 {
                                                     self.remove_destination = Some(dest_id);
                                                 }
@@ -1180,6 +1231,16 @@ enum ButtonVariant {
     Primary,
     StreamActive,
     RecordActive,
+    Danger,
+}
+
+fn paint_focus_ring(painter: &egui::Painter, rect: Rect, corner_radius: u8, palette: Palette) {
+    painter.rect_stroke(
+        rect.expand(1.0),
+        CornerRadius::same(corner_radius.saturating_add(1)),
+        Stroke::new(2.0, palette.stream_accent),
+        egui::StrokeKind::Outside,
+    );
 }
 
 fn header_pill<R>(
@@ -1218,15 +1279,17 @@ fn icon_button(
     palette: Palette,
     tooltip: &str,
 ) -> egui::Response {
+    let is_enabled = enabled && ui.is_enabled();
     let size = Vec2::new(34.0, 28.0);
-    let sense = if enabled {
+    let sense = if is_enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, is_enabled, tooltip));
 
-    let (bg, border, fg) = if !enabled {
+    let (bg, border, fg) = if !is_enabled {
         (
             palette.btn_disabled_bg,
             palette.btn_disabled_border,
@@ -1258,6 +1321,9 @@ fn icon_button(
         Stroke::new(1.0, border),
         egui::StrokeKind::Inside,
     );
+    if response.has_focus() {
+        paint_focus_ring(painter, rect, 6, palette);
+    }
 
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
     paint_icon(painter, icon_rect, icon, fg);
@@ -1265,33 +1331,43 @@ fn icon_button(
     response.on_hover_text(tooltip)
 }
 
-fn action_button(
-    ui: &mut EguiUi,
-    icon: Icon,
-    label: &str,
+struct ButtonSpec<'a> {
+    icon: Option<(Icon, Color32)>,
+    label: &'a str,
     enabled: bool,
-    icon_color: Color32,
     variant: ButtonVariant,
-    palette: Palette,
-) -> egui::Response {
-    let font_id = FontId::proportional(13.5);
+    text_color_override: Option<Color32>,
+    height: f32,
+    font_size: f32,
+    pad_x: f32,
+}
+
+fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egui::Response {
+    let is_enabled = spec.enabled && ui.is_enabled();
+    let font_id = FontId::proportional(spec.font_size);
     let text_galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font_id, Color32::PLACEHOLDER);
-    let pad_x = 11.0;
+        .layout_no_wrap(spec.label.to_owned(), font_id, Color32::PLACEHOLDER);
     let icon_size = 15.0;
     let gap = 7.0;
-    let width = pad_x + icon_size + gap + text_galley.size().x + pad_x;
-    let height = 30.0;
+    let width = if spec.icon.is_some() {
+        spec.pad_x + icon_size + gap + text_galley.size().x + spec.pad_x
+    } else {
+        spec.pad_x + text_galley.size().x + spec.pad_x
+    };
 
-    let sense = if enabled {
+    let sense = if is_enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, spec.height), sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, is_enabled, spec.label)
+    });
 
-    let (bg, border, text_color, fg_icon) = if !enabled {
+    let icon_color = spec.icon.map_or(palette.text_primary, |(_, color)| color);
+    let (bg, border, text_color, fg_icon) = if !is_enabled {
         (
             palette.btn_disabled_bg,
             palette.btn_disabled_border,
@@ -1299,7 +1375,7 @@ fn action_button(
             palette.text_disabled,
         )
     } else {
-        match variant {
+        match spec.variant {
             ButtonVariant::Neutral => {
                 let bg = if response.is_pointer_button_down_on() {
                     palette.btn_bg_active
@@ -1313,7 +1389,12 @@ fn action_button(
                 } else {
                     palette.btn_border
                 };
-                (bg, border, palette.text_primary, icon_color)
+                (
+                    bg,
+                    border,
+                    spec.text_color_override.unwrap_or(palette.text_primary),
+                    icon_color,
+                )
             }
             ButtonVariant::Primary => {
                 let bg = if response.hovered() {
@@ -1336,7 +1417,7 @@ fn action_button(
                 };
                 (bg, palette.stream_active_border, Color32::WHITE, Color32::WHITE)
             }
-            ButtonVariant::RecordActive => {
+            ButtonVariant::RecordActive | ButtonVariant::Danger => {
                 let bg = if response.hovered() {
                     palette.record_active_hover
                 } else {
@@ -1355,18 +1436,123 @@ fn action_button(
         Stroke::new(1.0, border),
         egui::StrokeKind::Inside,
     );
+    if response.has_focus() {
+        paint_focus_ring(painter, rect, 7, palette);
+    }
 
-    let icon_center = Pos2::new(rect.left() + pad_x + icon_size * 0.5, rect.center().y);
-    let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(icon_size));
-    paint_icon(painter, icon_rect, icon, fg_icon);
+    if let Some((icon, _)) = spec.icon {
+        let icon_center = Pos2::new(rect.left() + spec.pad_x + icon_size * 0.5, rect.center().y);
+        let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(icon_size));
+        paint_icon(painter, icon_rect, icon, fg_icon);
 
-    let text_pos = Pos2::new(
-        rect.left() + pad_x + icon_size + gap,
-        rect.center().y - text_galley.size().y * 0.5,
-    );
-    painter.galley(text_pos, text_galley, text_color);
+        let text_pos = Pos2::new(
+            rect.left() + spec.pad_x + icon_size + gap,
+            rect.center().y - text_galley.size().y * 0.5,
+        );
+        painter.galley(text_pos, text_galley, text_color);
+    } else {
+        let text_pos = Pos2::new(
+            rect.center().x - text_galley.size().x * 0.5,
+            rect.center().y - text_galley.size().y * 0.5,
+        );
+        painter.galley(text_pos, text_galley, text_color);
+    }
 
     response
+}
+
+fn action_button(
+    ui: &mut EguiUi,
+    icon: impl Into<Option<Icon>>,
+    label: &str,
+    enabled: bool,
+    icon_color: Color32,
+    variant: ButtonVariant,
+    palette: Palette,
+) -> egui::Response {
+    render_button(
+        ui,
+        ButtonSpec {
+            icon: icon.into().map(|icon| (icon, icon_color)),
+            label,
+            enabled,
+            variant,
+            text_color_override: None,
+            height: 30.0,
+            font_size: 13.5,
+            pad_x: 11.0,
+        },
+        palette,
+    )
+}
+
+fn text_button(
+    ui: &mut EguiUi,
+    label: &str,
+    enabled: bool,
+    variant: ButtonVariant,
+    palette: Palette,
+) -> egui::Response {
+    render_button(
+        ui,
+        ButtonSpec {
+            icon: None,
+            label,
+            enabled,
+            variant,
+            text_color_override: None,
+            height: 30.0,
+            font_size: 13.5,
+            pad_x: 11.0,
+        },
+        palette,
+    )
+}
+
+fn neutral_button_colored(
+    ui: &mut EguiUi,
+    label: &str,
+    enabled: bool,
+    text_color: Color32,
+    palette: Palette,
+) -> egui::Response {
+    render_button(
+        ui,
+        ButtonSpec {
+            icon: None,
+            label,
+            enabled,
+            variant: ButtonVariant::Neutral,
+            text_color_override: Some(text_color),
+            height: 30.0,
+            font_size: 13.5,
+            pad_x: 11.0,
+        },
+        palette,
+    )
+}
+
+fn compact_button(
+    ui: &mut EguiUi,
+    label: &str,
+    enabled: bool,
+    text_color: Option<Color32>,
+    palette: Palette,
+) -> egui::Response {
+    render_button(
+        ui,
+        ButtonSpec {
+            icon: None,
+            label,
+            enabled,
+            variant: ButtonVariant::Neutral,
+            text_color_override: text_color,
+            height: 25.0,
+            font_size: 12.5,
+            pad_x: 9.0,
+        },
+        palette,
+    )
 }
 
 fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) -> egui::Response {
@@ -1383,6 +1569,14 @@ fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) ->
     let height = 30.0;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
 
     let (bg, border, text_color) = if selected {
         (
@@ -1411,6 +1605,9 @@ fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) ->
             Stroke::new(1.0, border),
             egui::StrokeKind::Inside,
         );
+    }
+    if response.has_focus() {
+        paint_focus_ring(painter, rect, 7, palette);
     }
 
     let text_pos = Pos2::new(
@@ -1906,12 +2103,17 @@ fn source_settings(
                             if chosen != dest_id {
                                 replace_slot = Some((slot_index, chosen));
                             }
-                            if ui.small_button("Redigera").clicked() {
+                            if compact_button(ui, "Redigera", true, None, palette).clicked() {
                                 outcome.open_destinations = true;
                             }
-                            if ui
-                                .small_button(RichText::new("Ta bort").color(palette.danger))
-                                .clicked()
+                            if compact_button(
+                                ui,
+                                "Ta bort",
+                                true,
+                                Some(palette.danger),
+                                palette,
+                            )
+                            .clicked()
                             {
                                 remove_slot = Some(slot_index);
                             }
@@ -2007,10 +2209,14 @@ fn source_settings(
                     });
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Skapa och välj").clicked() {
+                        if text_button(ui, "Skapa och välj", true, ButtonVariant::Neutral, palette)
+                            .clicked()
+                        {
                             create = true;
                         }
-                        if ui.button("Avbryt").clicked() {
+                        if text_button(ui, "Avbryt", true, ButtonVariant::Neutral, palette)
+                            .clicked()
+                        {
                             cancel = true;
                         }
                     });
