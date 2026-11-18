@@ -177,6 +177,12 @@ enum View {
     Destinations,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopConfirm {
+    Streams,
+    Recordings,
+}
+
 pub struct Ui {
     engine: Engine,
     settings: Settings,
@@ -187,6 +193,7 @@ pub struct Ui {
     remove_source: bool,
     remove_destination: Option<u64>,
     new_destination_draft: Option<Destination>,
+    confirm_stop: Option<StopConfirm>,
     app_icon: Option<TextureHandle>,
     close_blocked: bool,
     load_blocked: bool,
@@ -226,6 +233,7 @@ impl Ui {
             remove_source: false,
             remove_destination: None,
             new_destination_draft: None,
+            confirm_stop: None,
             app_icon,
             close_blocked: false,
             load_blocked,
@@ -287,7 +295,170 @@ impl Ui {
         }
     }
 
+    fn header_stream_disabled_reason(&self, can_start_streams: bool) -> Option<&'static str> {
+        if can_start_streams {
+            return None;
+        }
+        if self.settings.sources.is_empty() {
+            return Some("Lägg till minst en ljudkälla");
+        }
+        let idle_sources: Vec<&Source> = self
+            .settings
+            .sources
+            .iter()
+            .filter(|source| !self.engine.streaming(source.id))
+            .collect();
+        if idle_sources.is_empty() {
+            return Some("Alla ljudkällor sänder redan");
+        }
+        if idle_sources.iter().all(|source| source.device.is_empty()) {
+            Some("Välj en ljudenhet i inställningarna")
+        } else {
+            Some("Lägg till minst en destination")
+        }
+    }
+
+    fn header_record_disabled_reason(&self, can_start_recordings: bool) -> Option<&'static str> {
+        if can_start_recordings {
+            return None;
+        }
+        if self.settings.sources.is_empty() {
+            return Some("Lägg till minst en ljudkälla");
+        }
+        let idle_sources: Vec<&Source> = self
+            .settings
+            .sources
+            .iter()
+            .filter(|source| !self.engine.recording(source.id))
+            .collect();
+        if idle_sources.is_empty() {
+            return Some("Alla ljudkällor spelar redan in");
+        }
+        if idle_sources.iter().all(|source| source.device.is_empty()) {
+            Some("Välj en ljudenhet i inställningarna")
+        } else {
+            Some("Välj en inspelningsmapp")
+        }
+    }
+
+    fn stop_confirm_modal(&mut self, ctx: &Context, palette: Palette) {
+        let Some(kind) = self.confirm_stop else {
+            return;
+        };
+        let active_count = match kind {
+            StopConfirm::Streams => self
+                .settings
+                .sources
+                .iter()
+                .filter(|source| self.engine.streaming(source.id))
+                .count(),
+            StopConfirm::Recordings => self
+                .settings
+                .sources
+                .iter()
+                .filter(|source| self.engine.recording(source.id))
+                .count(),
+        };
+        if active_count == 0 {
+            self.confirm_stop = None;
+            return;
+        }
+
+        let (title, body) = match kind {
+            StopConfirm::Streams => (
+                "Stoppa alla sändningar?",
+                if active_count == 1 {
+                    "1 pågående sändning kommer att stoppas.".to_owned()
+                } else {
+                    format!("{active_count} pågående sändningar kommer att stoppas.")
+                },
+            ),
+            StopConfirm::Recordings => (
+                "Stoppa alla inspelningar?",
+                if active_count == 1 {
+                    "1 pågående inspelning kommer att stoppas.".to_owned()
+                } else {
+                    format!("{active_count} pågående inspelningar kommer att stoppas.")
+                },
+            ),
+        };
+
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::new("confirm-stop-modal"))
+            .frame(
+                Frame::new()
+                    .fill(palette.card_bg)
+                    .stroke(Stroke::new(1.0, palette.card_border))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(18, 16))
+                    .shadow(palette.card_shadow),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                ui.label(strong_text(title, 16.0, palette.text_primary));
+                ui.add_space(6.0);
+                ui.label(RichText::new(&body).color(palette.text_secondary));
+                ui.add_space(14.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if action_button(
+                        ui,
+                        Icon::Stop,
+                        "Stoppa",
+                        true,
+                        Color32::WHITE,
+                        ButtonVariant::Danger,
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if text_button(ui, "Avbryt", true, ButtonVariant::Neutral, palette).clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            match kind {
+                StopConfirm::Streams => {
+                    for source in &self.settings.sources {
+                        if self.engine.streaming(source.id) {
+                            self.engine
+                                .set_stream(source, &self.settings.destinations, false);
+                        }
+                    }
+                }
+                StopConfirm::Recordings => {
+                    for source in &self.settings.sources {
+                        if self.engine.recording(source.id) {
+                            self.engine.set_record(source, false);
+                        }
+                    }
+                }
+            }
+            self.confirm_stop = None;
+        } else if cancelled || modal.should_close() {
+            self.confirm_stop = None;
+        }
+    }
+
     fn header(&mut self, ui: &mut EguiUi, palette: Palette) {
+        let total_sources = self.settings.sources.len();
+        let streaming_count = self
+            .settings
+            .sources
+            .iter()
+            .filter(|source| self.engine.streaming(source.id))
+            .count();
+        let recording_count = self
+            .settings
+            .sources
+            .iter()
+            .filter(|source| self.engine.recording(source.id))
+            .count();
         let can_start_streams = self.settings.sources.iter().any(|source| {
             !source.device.is_empty()
                 && !source
@@ -295,21 +466,15 @@ impl Ui {
                     .is_empty()
                 && !self.engine.streaming(source.id)
         });
-        let can_stop_streams = self
-            .settings
-            .sources
-            .iter()
-            .any(|source| self.engine.streaming(source.id));
+        let can_stop_streams = streaming_count > 0;
         let can_start_recordings = self.settings.sources.iter().any(|source| {
             !source.device.is_empty()
                 && !source.recording.folder.trim().is_empty()
                 && !self.engine.recording(source.id)
         });
-        let can_stop_recordings = self
-            .settings
-            .sources
-            .iter()
-            .any(|source| self.engine.recording(source.id));
+        let can_stop_recordings = recording_count > 0;
+        let stream_disabled_reason = self.header_stream_disabled_reason(can_start_streams);
+        let record_disabled_reason = self.header_record_disabled_reason(can_start_recordings);
 
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
@@ -324,19 +489,29 @@ impl Ui {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.set_height(36.0);
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
 
-                // Recording bulk controls pill (far right).
-                let (record_start, record_stop) =
-                    header_pill(ui, "record-pill", palette, |ui| {
-                    let start = icon_button(
-                        ui,
-                        Icon::Record,
+                // Recording bulk controls pill + live count (far right).
+                header_count(
+                    ui,
+                    recording_count,
+                    total_sources,
+                    palette.record_accent,
+                    palette,
+                );
+                let (record_start, record_stop) = header_pill(ui, "record-pill", palette, |ui| {
+                    let start = with_disabled_reason(
+                        icon_button(
+                            ui,
+                            Icon::Record,
+                            can_start_recordings,
+                            palette.record_accent,
+                            false,
+                            palette,
+                            "Starta alla inspelningar",
+                        ),
                         can_start_recordings,
-                        palette.record_accent,
-                        false,
-                        palette,
-                        "Starta alla inspelningar",
+                        record_disabled_reason,
                     );
                     let stop = icon_button(
                         ui,
@@ -360,30 +535,38 @@ impl Ui {
                     }
                 }
                 if record_stop.clicked() {
-                    for source in &self.settings.sources {
-                        if self.engine.recording(source.id) {
-                            self.engine.set_record(source, false);
-                        }
-                    }
+                    self.confirm_stop = Some(StopConfirm::Recordings);
                 }
 
-                // Streaming bulk controls pill (left of recording pill).
-                let (stream_start, stream_stop) =
-                    header_pill(ui, "stream-pill", palette, |ui| {
-                    let start = icon_button(
-                        ui,
-                        Icon::Broadcast,
+                ui.add_space(6.0);
+
+                // Streaming bulk controls pill + live count (left of recording group).
+                header_count(
+                    ui,
+                    streaming_count,
+                    total_sources,
+                    palette.stream_accent,
+                    palette,
+                );
+                let (stream_start, stream_stop) = header_pill(ui, "stream-pill", palette, |ui| {
+                    let start = with_disabled_reason(
+                        icon_button(
+                            ui,
+                            Icon::Broadcast,
+                            can_start_streams,
+                            palette.stream_accent,
+                            false,
+                            palette,
+                            "Starta alla sändningar",
+                        ),
                         can_start_streams,
-                        palette.stream_accent,
-                        false,
-                        palette,
-                        "Starta alla sändningar",
+                        stream_disabled_reason,
                     );
                     let stop = icon_button(
                         ui,
                         Icon::BroadcastStop,
                         can_stop_streams,
-                        palette.record_accent,
+                        palette.stream_accent,
                         false,
                         palette,
                         "Stoppa alla sändningar",
@@ -404,12 +587,7 @@ impl Ui {
                     }
                 }
                 if stream_stop.clicked() {
-                    for source in &self.settings.sources {
-                        if self.engine.streaming(source.id) {
-                            self.engine
-                                .set_stream(source, &self.settings.destinations, false);
-                        }
-                    }
+                    self.confirm_stop = Some(StopConfirm::Streams);
                 }
             });
         });
@@ -925,6 +1103,8 @@ impl eframe::App for Ui {
                 }
             });
 
+        self.stop_confirm_modal(ctx, palette);
+
         if self.dirty && ctx.input(|input| input.viewport().close_requested()) {
             self.save();
             if self.dirty {
@@ -1241,6 +1421,43 @@ fn paint_focus_ring(painter: &egui::Painter, rect: Rect, corner_radius: u8, pale
         Stroke::new(2.0, palette.stream_accent),
         egui::StrokeKind::Outside,
     );
+}
+
+fn header_count(
+    ui: &mut EguiUi,
+    active: usize,
+    total: usize,
+    active_color: Color32,
+    palette: Palette,
+) -> egui::Response {
+    let color = if active > 0 {
+        active_color
+    } else {
+        palette.text_secondary
+    };
+    ui.label(
+        RichText::new(format!("{active}/{total}"))
+            .monospace()
+            .size(12.0)
+            .color(color),
+    )
+}
+
+fn with_disabled_reason(
+    response: egui::Response,
+    enabled: bool,
+    reason: Option<&str>,
+) -> egui::Response {
+    if enabled {
+        response
+    } else if let Some(reason) = reason {
+        // Custom disabled buttons allocate with Sense::hover() inside an enabled Ui,
+        // so response.enabled() is still true; attach both hover and disabled-hover
+        // tooltips so the reason always shows when hovered.
+        response.on_hover_text(reason).on_disabled_hover_text(reason)
+    } else {
+        response
+    }
 }
 
 fn header_pill<R>(
@@ -1705,6 +1922,34 @@ fn next_destination_id(destinations: &[Destination]) -> u64 {
     id
 }
 
+fn source_stream_disabled_reason(
+    source: &Source,
+    dest_count: usize,
+    streaming: bool,
+) -> Option<&'static str> {
+    if streaming {
+        None
+    } else if source.device.is_empty() {
+        Some("Välj en ljudenhet i inställningarna")
+    } else if dest_count == 0 {
+        Some("Lägg till minst en destination")
+    } else {
+        None
+    }
+}
+
+fn source_record_disabled_reason(source: &Source, recording: bool) -> Option<&'static str> {
+    if recording {
+        None
+    } else if source.device.is_empty() {
+        Some("Välj en ljudenhet i inställningarna")
+    } else if source.recording.folder.trim().is_empty() {
+        Some("Välj en inspelningsmapp")
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn source_card(
     ui: &mut EguiUi,
@@ -1810,19 +2055,24 @@ fn source_card(
         let count = source.resolve_destinations(destinations).len();
         ui.horizontal_wrapped(|ui| {
             let stream_enabled = streaming || (!source.device.is_empty() && count > 0);
+            let stream_reason = source_stream_disabled_reason(source, count, streaming);
             let (stream_icon, stream_label, stream_variant) = if streaming {
                 (Icon::Stop, "Stoppa sändning", ButtonVariant::StreamActive)
             } else {
                 (Icon::Broadcast, "Starta sändning", ButtonVariant::Neutral)
             };
-            if action_button(
-                ui,
-                stream_icon,
-                stream_label,
+            if with_disabled_reason(
+                action_button(
+                    ui,
+                    stream_icon,
+                    stream_label,
+                    stream_enabled,
+                    palette.stream_accent,
+                    stream_variant,
+                    palette,
+                ),
                 stream_enabled,
-                palette.stream_accent,
-                stream_variant,
-                palette,
+                stream_reason,
             )
             .clicked()
             {
@@ -1831,19 +2081,24 @@ fn source_card(
 
             let record_enabled = recording
                 || (!source.device.is_empty() && !source.recording.folder.trim().is_empty());
+            let record_reason = source_record_disabled_reason(source, recording);
             let (record_icon, record_label, record_variant) = if recording {
                 (Icon::Stop, "Stoppa inspelning", ButtonVariant::RecordActive)
             } else {
                 (Icon::Record, "Starta inspelning", ButtonVariant::Neutral)
             };
-            if action_button(
-                ui,
-                record_icon,
-                record_label,
+            if with_disabled_reason(
+                action_button(
+                    ui,
+                    record_icon,
+                    record_label,
+                    record_enabled,
+                    palette.record_accent,
+                    record_variant,
+                    palette,
+                ),
                 record_enabled,
-                palette.record_accent,
-                record_variant,
-                palette,
+                record_reason,
             )
             .clicked()
             {
@@ -2445,6 +2700,7 @@ mod tests {
             ..Default::default()
         };
         let mut rects = [Rect::NOTHING; 4];
+        let mut count_rects = [Rect::NOTHING; 2];
         let mut ids = [egui::Id::NULL; 4];
         let _ = ctx.run(input, |ctx| {
             let palette = Palette::for_theme(true);
@@ -2460,7 +2716,9 @@ mod tests {
                         ui.label(strong_text("Mötessändare", 18.0, palette.text_primary));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.set_height(36.0);
-                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let rec_count =
+                                header_count(ui, 1, 3, palette.record_accent, palette);
                             let (rec_start, rec_stop) =
                                 header_pill(ui, "record-pill", palette, |ui| {
                                     let start = icon_button(
@@ -2483,6 +2741,9 @@ mod tests {
                                     );
                                     (start, stop)
                                 });
+                            ui.add_space(6.0);
+                            let str_count =
+                                header_count(ui, 2, 3, palette.stream_accent, palette);
                             let (str_start, str_stop) =
                                 header_pill(ui, "stream-pill", palette, |ui| {
                                     let start = icon_button(
@@ -2498,7 +2759,7 @@ mod tests {
                                         ui,
                                         Icon::BroadcastStop,
                                         true,
-                                        palette.record_accent,
+                                        palette.stream_accent,
                                         false,
                                         palette,
                                         "Stoppa alla sändningar",
@@ -2511,6 +2772,7 @@ mod tests {
                                 rec_start.rect,
                                 rec_stop.rect,
                             ];
+                            count_rects = [str_count.rect, rec_count.rect];
                             ids = [str_start.id, str_stop.id, rec_start.id, rec_stop.id];
                         });
                     });
@@ -2524,22 +2786,37 @@ mod tests {
         }
 
         let [str_start, str_stop, rec_start, rec_stop] = rects;
+        let [str_count, rec_count] = count_rects;
         assert!(
             str_start.right() < str_stop.left(),
             "stream start ({str_start:?}) should be left of stream stop ({str_stop:?})"
         );
         assert!(
-            str_stop.right() < rec_start.left(),
-            "stream pill ({str_stop:?}) should be left of record pill ({rec_start:?})"
+            str_stop.right() < str_count.left(),
+            "stream pill ({str_stop:?}) should be left of stream count ({str_count:?})"
+        );
+        assert!(
+            str_count.right() < rec_start.left(),
+            "stream count ({str_count:?}) should be left of record pill ({rec_start:?})"
         );
         assert!(
             rec_start.right() < rec_stop.left(),
             "record start ({rec_start:?}) should be left of record stop ({rec_stop:?})"
         );
+        assert!(
+            rec_stop.right() < rec_count.left(),
+            "record pill ({rec_stop:?}) should be left of record count ({rec_count:?})"
+        );
         for other in [str_stop, rec_start, rec_stop] {
             assert!(
                 (str_start.center().y - other.center().y).abs() < 0.5,
                 "buttons should share vertical center: {str_start:?} vs {other:?}"
+            );
+        }
+        for count_rect in [str_count, rec_count] {
+            assert!(
+                (str_start.center().y - count_rect.center().y).abs() < 1.5,
+                "counts should align vertically with buttons: {str_start:?} vs {count_rect:?}"
             );
         }
         assert!(
