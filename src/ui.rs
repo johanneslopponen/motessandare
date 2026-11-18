@@ -7,6 +7,13 @@ use std::time::Duration;
 
 const ACCENT: Color32 = Color32::from_rgb(100, 217, 191);
 const WARNING: Color32 = Color32::from_rgb(246, 192, 113);
+const FILENAME_FORMATS: &[(&str, &str)] = &[
+    ("Namn – Datum – Tid", "{namn}-{datum}-{tid}"),
+    ("Datum – Tid – Namn", "{datum}-{tid}-{namn}"),
+    ("Datum – Namn", "{datum}-{namn}"),
+    ("Namn – Datum", "{namn}-{datum}"),
+    ("Namn – Unix-tid", "{namn}-{unix}"),
+];
 
 pub struct Ui {
     engine: Engine,
@@ -83,86 +90,78 @@ impl Ui {
         ui.horizontal_wrapped(|ui| {
             ui.heading(RichText::new("Mötessändare").size(25.0));
             ui.separator();
-            ui.menu_button("Sändningar", |ui| {
-                let can_start = self.sources.iter().any(|source| {
-                    !source.device.is_empty()
-                        && !source.destinations.is_empty()
-                        && !self.engine.streaming(source.id)
-                });
-                let can_stop = self
-                    .sources
-                    .iter()
-                    .any(|source| self.engine.streaming(source.id));
-                if ui
-                    .add_enabled(can_start, egui::Button::new("Starta alla sändningar"))
-                    .clicked()
-                {
-                    for source in &self.sources {
-                        if !source.device.is_empty()
-                            && !source.destinations.is_empty()
-                            && !self.engine.streaming(source.id)
-                        {
-                            self.engine.set_stream(source, true);
-                        }
-                    }
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(can_stop, egui::Button::new("Stoppa alla sändningar"))
-                    .clicked()
-                {
-                    for source in &self.sources {
-                        if self.engine.streaming(source.id) {
-                            self.engine.set_stream(source, false);
-                        }
-                    }
-                    ui.close_menu();
-                }
+            let can_start_streams = self.sources.iter().any(|source| {
+                !source.device.is_empty()
+                    && !source.destinations.is_empty()
+                    && !self.engine.streaming(source.id)
             });
-            ui.menu_button("Inspelningar", |ui| {
-                let can_start = self.sources.iter().any(|source| {
-                    !source.device.is_empty()
-                        && !source.recording.folder.trim().is_empty()
-                        && !self.engine.recording(source.id)
-                });
-                let can_stop = self
-                    .sources
-                    .iter()
-                    .any(|source| self.engine.recording(source.id));
-                if ui
-                    .add_enabled(can_start, egui::Button::new("Starta alla inspelningar"))
-                    .clicked()
-                {
-                    for source in &self.sources {
-                        if !source.device.is_empty()
-                            && !source.recording.folder.trim().is_empty()
-                            && !self.engine.recording(source.id)
-                        {
-                            self.engine.set_record(source, true);
-                        }
-                    }
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(can_stop, egui::Button::new("Stoppa alla inspelningar"))
-                    .clicked()
-                {
-                    for source in &self.sources {
-                        if self.engine.recording(source.id) {
-                            self.engine.set_record(source, false);
-                        }
-                    }
-                    ui.close_menu();
-                }
-            });
+            let can_stop_streams = self
+                .sources
+                .iter()
+                .any(|source| self.engine.streaming(source.id));
             if ui
-                .add_enabled(self.dirty, egui::Button::new("Spara inställningar"))
+                .add_enabled(
+                    can_start_streams,
+                    egui::Button::new("Starta alla sändningar"),
+                )
                 .clicked()
             {
-                self.save();
+                for source in &self.sources {
+                    if !source.device.is_empty()
+                        && !source.destinations.is_empty()
+                        && !self.engine.streaming(source.id)
+                    {
+                        self.engine.set_stream(source, true);
+                    }
+                }
             }
-            if self.dirty {
-                ui.label(RichText::new("Osparade ändringar").color(WARNING));
+            if ui
+                .add_enabled(can_stop_streams, egui::Button::new("Stoppa alla sändningar"))
+                .clicked()
+            {
+                for source in &self.sources {
+                    if self.engine.streaming(source.id) {
+                        self.engine.set_stream(source, false);
+                    }
+                }
+            }
+            let can_start_recordings = self.sources.iter().any(|source| {
+                !source.device.is_empty()
+                    && !source.recording.folder.trim().is_empty()
+                    && !self.engine.recording(source.id)
+            });
+            let can_stop_recordings = self
+                .sources
+                .iter()
+                .any(|source| self.engine.recording(source.id));
+            if ui
+                .add_enabled(
+                    can_start_recordings,
+                    egui::Button::new("Starta alla inspelningar"),
+                )
+                .clicked()
+            {
+                for source in &self.sources {
+                    if !source.device.is_empty()
+                        && !source.recording.folder.trim().is_empty()
+                        && !self.engine.recording(source.id)
+                    {
+                        self.engine.set_record(source, true);
+                    }
+                }
+            }
+            if ui
+                .add_enabled(
+                    can_stop_recordings,
+                    egui::Button::new("Stoppa alla inspelningar"),
+                )
+                .clicked()
+            {
+                for source in &self.sources {
+                    if self.engine.recording(source.id) {
+                        self.engine.set_record(source, false);
+                    }
+                }
             }
         });
         if let Some(message) = &self.notice {
@@ -210,46 +209,32 @@ impl eframe::App for Ui {
             ui.add_space(6.0);
         });
 
-        egui::SidePanel::left("sources")
-            .default_width(216.0)
-            .width_range(160.0..=360.0)
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.heading("Ljudkällor");
-                if ui
-                    .add_enabled(
-                        !self.load_blocked,
-                        egui::Button::new("+ Lägg till ljudkälla"),
-                    )
-                    .clicked()
-                {
-                    self.add_source();
-                }
-                ui.separator();
-                ScrollArea::vertical().show(ui, |ui| {
-                    for source in &self.sources {
-                        let name = display_name(source);
-                        if ui
-                            .selectable_label(self.selected == Some(source.id), name)
-                            .clicked()
-                        {
-                            self.selected = Some(source.id);
-                            self.configure = true;
-                            self.remove_source = false;
-                        }
-                    }
-                });
-            });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.load_blocked {
                 return;
             }
-            let Some(index) = self
-                .sources
-                .iter()
-                .position(|source| Some(source.id) == self.selected)
-            else {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .selectable_value(&mut self.configure, false, "Översikt")
+                    .clicked()
+                {
+                    self.remove_source = false;
+                }
+                if ui.button("+ Lägg till ljudkälla").clicked() {
+                    self.add_source();
+                }
+                if ui
+                    .add_enabled(self.dirty, egui::Button::new("Spara inställningar"))
+                    .clicked()
+                {
+                    self.save();
+                }
+                if self.dirty {
+                    ui.label(RichText::new("Osparade ändringar").color(WARNING));
+                }
+            });
+            ui.separator();
+            if self.sources.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
                     ui.heading("Lägg till en ljudkälla");
@@ -259,12 +244,7 @@ impl eframe::App for Ui {
                     }
                 });
                 return;
-            };
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.configure, false, "Översikt");
-                ui.selectable_value(&mut self.configure, true, "Inställningar");
-            });
-            ui.separator();
+            }
             if !self.configure {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -292,6 +272,15 @@ impl eframe::App for Ui {
                     });
                 return;
             }
+
+            let Some(index) = self
+                .sources
+                .iter()
+                .position(|source| Some(source.id) == self.selected)
+            else {
+                self.configure = false;
+                return;
+            };
 
             let source = &mut self.sources[index];
             let streaming = self.engine.streaming(source.id);
@@ -338,6 +327,7 @@ impl eframe::App for Ui {
                     .get(index)
                     .or_else(|| self.sources.last())
                     .map(|source| source.id);
+                self.configure = false;
                 self.remove_source = false;
             }
             if changed || removed {
@@ -597,6 +587,45 @@ fn source_settings(
         .num_columns(2)
         .show(ui, |ui| {
             changed |= field(ui, "Mapp", &mut source.recording.folder, false);
+            ui.label("Filnamnsformat");
+            let current_preset = FILENAME_FORMATS
+                .iter()
+                .find(|(_, template)| *template == source.recording.filename_format)
+                .map_or("Anpassat", |(label, _)| *label);
+            ComboBox::from_id_salt("filename-format")
+                .width(260.0)
+                .selected_text(current_preset)
+                .show_ui(ui, |ui| {
+                    for &(label, template) in FILENAME_FORMATS {
+                        if ui
+                            .selectable_label(source.recording.filename_format == template, label)
+                            .clicked()
+                        {
+                            source.recording.filename_format = template.to_owned();
+                            changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+            let template_label = ui.label("Filnamnsmall").id;
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut source.recording.filename_format)
+                        .desired_width(260.0),
+                )
+                .labelled_by(template_label)
+                .on_hover_text(
+                    "Platshållare: {namn}, {datum}, {tid}, {år}, {månad}, {dag}, {timme}, {minut}, {sekund}, {unix}",
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Exempel");
+            ui.weak(crate::output::preview_recording_filename(
+                &source.recording.filename_format,
+                &source.name,
+                &source.recording.format,
+            ));
+            ui.end_row();
             ui.label("Filformat");
             let was_lossy = bitrate_range(&source.recording.format).is_some();
             let format_changed = choice(

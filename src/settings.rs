@@ -26,10 +26,13 @@ impl Default for Destination {
     }
 }
 
+pub const DEFAULT_FILENAME_FORMAT: &str = "{namn}-{datum}-{tid}";
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Recording {
     pub folder: String,
+    pub filename_format: String,
     pub format: String,
     pub quality: u32,
 }
@@ -48,6 +51,7 @@ impl Default for Recording {
                 .join("Mötessändare")
                 .to_string_lossy()
                 .into_owned(),
+            filename_format: DEFAULT_FILENAME_FORMAT.into(),
             format: "FLAC".into(),
             quality: 24,
         }
