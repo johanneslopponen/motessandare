@@ -232,6 +232,13 @@ impl Ui {
         }
     }
 
+    fn navigate(&mut self, view: View) {
+        self.view = view;
+        self.remove_source = false;
+        self.remove_destination = None;
+        self.new_destination_draft = None;
+    }
+
     fn add_source(&mut self) {
         if self.load_blocked {
             return;
@@ -244,10 +251,7 @@ impl Ui {
             ..Source::default()
         });
         self.selected_source = Some(id);
-        self.view = View::SourceSettings;
-        self.remove_source = false;
-        self.remove_destination = None;
-        self.new_destination_draft = None;
+        self.navigate(View::SourceSettings);
         self.dirty = true;
         self.engine.update(&self.settings.sources);
     }
@@ -262,9 +266,7 @@ impl Ui {
             name: format!("Destination {id}"),
             ..Destination::default()
         });
-        self.view = View::Destinations;
-        self.remove_destination = None;
-        self.new_destination_draft = None;
+        self.navigate(View::Destinations);
         self.dirty = true;
     }
 
@@ -466,7 +468,7 @@ impl eframe::App for Ui {
                     return;
                 }
 
-                // Toolbar / Navigation bar: Översikt on the left, all other buttons on the right
+                // Toolbar / Navigation bar: tabs on the left, actions on the right
                 ui.horizontal(|ui| {
                     ui.set_min_height(30.0);
                     ui.spacing_mut().item_spacing.x = 8.0;
@@ -478,10 +480,17 @@ impl eframe::App for Ui {
                     )
                     .clicked()
                     {
-                        self.view = View::Overview;
-                        self.remove_source = false;
-                        self.remove_destination = None;
-                        self.new_destination_draft = None;
+                        self.navigate(View::Overview);
+                    }
+                    if tab_button(
+                        ui,
+                        "Destinationer",
+                        self.view == View::Destinations,
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        self.navigate(View::Destinations);
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -512,32 +521,19 @@ impl eframe::App for Ui {
                             self.save();
                         }
 
-                        if action_button(
-                            ui,
-                            Icon::Plus,
-                            "Lägg till ljudkälla",
-                            true,
-                            palette.text_primary,
-                            ButtonVariant::Neutral,
-                            palette,
-                        )
-                        .clicked()
+                        if self.view != View::Destinations
+                            && action_button(
+                                ui,
+                                Icon::Plus,
+                                "Lägg till ljudkälla",
+                                true,
+                                palette.text_primary,
+                                ButtonVariant::Neutral,
+                                palette,
+                            )
+                            .clicked()
                         {
                             self.add_source();
-                        }
-
-                        if tab_button(
-                            ui,
-                            "Destinationer",
-                            self.view == View::Destinations,
-                            palette,
-                        )
-                        .clicked()
-                        {
-                            self.view = View::Destinations;
-                            self.remove_source = false;
-                            self.remove_destination = None;
-                            self.new_destination_draft = None;
                         }
 
                         if self.dirty {
@@ -583,9 +579,7 @@ impl eframe::App for Ui {
                             });
                         if let Some(id) = open_settings_id {
                             self.selected_source = Some(id);
-                            self.view = View::SourceSettings;
-                            self.remove_source = false;
-                            self.new_destination_draft = None;
+                            self.navigate(View::SourceSettings);
                         }
                     }
                     View::SourceSettings => {
@@ -595,9 +589,29 @@ impl eframe::App for Ui {
                             .iter()
                             .position(|source| Some(source.id) == self.selected_source)
                         else {
-                            self.view = View::Overview;
+                            self.navigate(View::Overview);
                             return;
                         };
+                        let mut go_overview = false;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if ui.button("← Översikt").clicked() {
+                                go_overview = true;
+                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    " / {}",
+                                    display_name(&self.settings.sources[index])
+                                ))
+                                .size(13.5)
+                                .color(palette.text_secondary),
+                            );
+                        });
+                        if go_overview {
+                            self.navigate(View::Overview);
+                            return;
+                        }
+                        ui.add_space(6.0);
                         let source_id = self.settings.sources[index].id;
                         let streaming = self.engine.streaming(source_id);
                         let recording = self.engine.recording(source_id);
@@ -673,9 +687,7 @@ impl eframe::App for Ui {
                                 });
                             });
                         if outcome.open_destinations {
-                            self.view = View::Destinations;
-                            self.remove_destination = None;
-                            self.new_destination_draft = None;
+                            self.navigate(View::Destinations);
                         }
                         if removed {
                             self.settings.sources.remove(index);
@@ -685,9 +697,7 @@ impl eframe::App for Ui {
                                 .get(index)
                                 .or_else(|| self.settings.sources.last())
                                 .map(|source| source.id);
-                            self.view = View::Overview;
-                            self.remove_source = false;
-                            self.new_destination_draft = None;
+                            self.navigate(View::Overview);
                         }
                         if outcome.changed || removed {
                             self.dirty = true;
