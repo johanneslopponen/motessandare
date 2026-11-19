@@ -188,6 +188,7 @@ enum StopConfirm {
 }
 
 pub struct Ui {
+    saved_recordings: std::collections::VecDeque<crate::recording_dialog::SavedRecording>,
     engine: Engine,
     settings: Settings,
     selected_source: Option<u64>,
@@ -235,6 +236,7 @@ impl Ui {
             view: View::Overview,
             dirty: false,
             saved_at: None,
+            saved_recordings: Default::default(),
             notice,
             remove_source: false,
             remove_destination: None,
@@ -525,6 +527,7 @@ impl Ui {
                 ui.set_height(36.0);
                 ui.spacing_mut().item_spacing.x = 6.0;
 
+                let show_group_names = ui.available_width() >= 550.0;
                 // Recording bulk controls pill + live count (far right).
                 header_count(
                     ui,
@@ -558,6 +561,9 @@ impl Ui {
                     );
                     (start, stop)
                 });
+                if show_group_names {
+                    ui.small("Inspelning");
+                }
                 if record_start.clicked() {
                     for source in &self.settings.sources {
                         if !source.device.is_empty()
@@ -607,6 +613,9 @@ impl Ui {
                     );
                     (start, stop)
                 });
+                if show_group_names {
+                    ui.small("Sändning");
+                }
                 if stream_start.clicked() {
                     for source in &self.settings.sources {
                         if !source.device.is_empty()
@@ -619,6 +628,9 @@ impl Ui {
                                 .set_stream(source, &self.settings.destinations, true);
                         }
                     }
+                }
+                if ui.available_width() >= 100.0 {
+                    ui.label(RichText::new("Alla ljudkällor").size(12.0).color(palette.text_secondary));
                 }
                 if stream_stop.clicked() {
                     self.confirm_stop = Some(StopConfirm::Streams);
@@ -1131,7 +1143,19 @@ impl eframe::App for Ui {
                 }
             });
 
-        self.stop_confirm_modal(ctx, palette);
+        for (source, result) in self.engine.completed_recordings() {
+            match result {
+                Ok(path) => self.saved_recordings.push_back(crate::recording_dialog::SavedRecording::new(source, path)),
+                Err(error) => self.notice = Some(format!("Kunde inte slutföra inspelningen för {source}. {error}")),
+            }
+        }
+        if self.confirm_stop.is_some() {
+            self.stop_confirm_modal(ctx, palette);
+        } else if let Some(recording) = self.saved_recordings.front_mut()
+            && recording.show(ctx)
+        {
+            self.saved_recordings.pop_front();
+        }
 
         if self.dirty && ctx.input(|input| input.viewport().close_requested()) {
             self.save();
@@ -1930,7 +1954,7 @@ fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) ->
 
 fn status_pill(
     ui: &mut EguiUi,
-    text: impl Into<String>,
+    text: impl Into<RichText>,
     bg: Color32,
     border: Color32,
     fg: Color32,
@@ -1941,7 +1965,7 @@ fn status_pill(
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).size(12.0).color(fg));
+            ui.label(text.into().size(12.0).color(fg));
         });
 }
 
@@ -2054,6 +2078,7 @@ fn source_card(
     palette: Palette,
 ) -> bool {
     let mut open_settings = false;
+    let live = engine.live_status(source.id);
     let border_color = if recording {
         palette.record_active_border
     } else if streaming {
@@ -2066,12 +2091,12 @@ fn source_card(
         ui.set_width(ui.available_width());
 
         // Card header: title + active badges on left, settings button on right
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(strong_text(display_name(source), 16.5, palette.text_primary));
             if streaming {
                 status_pill(
                     ui,
-                    "Sänder",
+                    if live.connected > 0 { "Sänder" } else { "Sändning begärd" },
                     palette.stream_pill_bg,
                     palette.stream_active_border,
                     palette.stream_accent,
@@ -2080,7 +2105,12 @@ fn source_card(
             if recording {
                 status_pill(
                     ui,
-                    "Spelar in",
+                    RichText::new(format!(
+                        "Spelar in · {:02}:{:02}:{:02}",
+                        live.elapsed.as_secs() / 3600,
+                        live.elapsed.as_secs() / 60 % 60,
+                        live.elapsed.as_secs() % 60,
+                    )).monospace(),
                     palette.record_pill_bg,
                     palette.record_active_border,
                     palette.record_accent,
@@ -2115,17 +2145,31 @@ fn source_card(
         ui.add_space(6.0);
 
         let present = engine.present(source.id);
-        let status = engine.status(source.id);
+
         if !present {
             let message = if source.device.is_empty() {
                 "Välj en ljudingång i inställningarna."
+            } else if streaming && recording {
+                "Ljudingången saknas – sändning och inspelning får tyst signal."
+            } else if streaming {
+                "Ljudingången saknas – sändningen får tyst signal."
+            } else if recording {
+                "Ljudingången saknas – inspelningen får tyst signal."
             } else {
-                "Väntar på ljudenheten. Startade utgångar får tyst signal."
+                "Väntar på ljudingången."
             };
-            ui.label(RichText::new(message).size(12.5).color(palette.warning));
+            ui.label(RichText::new(message).strong().color(palette.warning));
         }
-        if !status.is_empty() {
-            ui.label(RichText::new(&status).size(12.5).color(palette.text_secondary));
+        if live.total > 0 {
+            ui.label(format!("{} av {} sändningsmål anslutna", live.connected, live.total))
+                .on_hover_text(live.targets.join("\n"));
+            for detail in &live.issues {
+                ui.colored_label(palette.warning, detail);
+            }
+        }
+        if !live.record_detail.is_empty() {
+            let color = if recording { palette.text_secondary } else { palette.warning };
+            ui.label(RichText::new(&live.record_detail).size(12.5).color(color));
         }
 
         let (left, right) = if present {

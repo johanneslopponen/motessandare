@@ -3,6 +3,7 @@
 mod capture;
 mod engine;
 mod output;
+mod recording_dialog;
 mod settings;
 mod ui;
 

@@ -30,6 +30,7 @@ struct Session {
 struct Mixer {
     sources: Vec<Source>,
     sessions: HashMap<u64, Session>,
+    finalizing: Vec<(String, Output)>,
 }
 
 #[derive(Default)]
@@ -145,27 +146,45 @@ impl Engine {
             .get(&id)
             .map_or((0., 0.), |s| s.peak)
     }
-    pub fn status(&self, id: u64) -> String {
+    pub fn live_status(&self, id: u64) -> LiveStatus {
         let mixer = self.mixer.lock().unwrap();
-        let Some(s) = mixer.sessions.get(&id) else {
-            return String::new();
-        };
-        let mut statuses: Vec<_> = s
-            .streams
-            .iter()
-            .enumerate()
-            .map(|(i, (label, output))| {
-                if label.is_empty() {
-                    format!("Sändare {} · {}", i + 1, output.status())
+        let mut status = LiveStatus::default();
+        if let Some(session) = mixer.sessions.get(&id) {
+            status.total = session.streams.len();
+            for (index, (name, output)) in session.streams.iter().enumerate() {
+                let sending = !output.finished() && !output.encoded_time().is_zero();
+                let detail = output.status();
+                status.connected += usize::from(sending);
+                let name = if name.is_empty() {
+                    format!("Sändare {}", index + 1)
                 } else {
-                    format!("{label} · {}", output.status())
+                    name.clone()
+                };
+                if !sending || detail != "Sänder" {
+                    status.issues.push(format!("{name} · {detail}"));
                 }
-            })
-            .collect();
-        if let Some(rec) = &s.recorder {
-            statuses.push(rec.status())
+                status.targets.push(name);
+            }
+            if let Some(recorder) = &session.recorder {
+                status.elapsed = recorder.encoded_time();
+                status.record_detail = recorder.status();
+            }
         }
-        statuses.join("   |   ")
+        status
+    }
+
+    pub fn completed_recordings(&self) -> Vec<(String, Result<std::path::PathBuf, String>)> {
+        let mut mixer = self.mixer.lock().unwrap();
+        let mut results = Vec::new();
+        mixer.finalizing.retain(|(name, output)| {
+            if output.finished() {
+                results.push((name.clone(), output.recording_result()));
+                false
+            } else {
+                true
+            }
+        });
+        results
     }
     pub fn set_stream(&self, source: &Source, destinations: &[Destination], start: bool) {
         let mut m = self.mixer.lock().unwrap();
@@ -187,7 +206,10 @@ impl Engine {
         let mut m = self.mixer.lock().unwrap();
         let s = m.sessions.entry(source.id).or_default();
         if !start {
-            s.recorder.take();
+            if let Some(mut recorder) = s.recorder.take() {
+                recorder.stop();
+                m.finalizing.push((source.name.clone(), recorder));
+            }
         } else if s.recorder.as_ref().is_none_or(Output::finished) {
             s.recorder = Some(Output::record(
                 &source.recording,
@@ -196,6 +218,16 @@ impl Engine {
             ));
         }
     }
+}
+
+#[derive(Default)]
+pub struct LiveStatus {
+    pub connected: usize,
+    pub total: usize,
+    pub issues: Vec<String>,
+    pub targets: Vec<String>,
+    pub elapsed: Duration,
+    pub record_detail: String,
 }
 
 impl Drop for Engine {

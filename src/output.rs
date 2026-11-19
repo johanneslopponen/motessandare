@@ -45,6 +45,8 @@ struct State {
     stop: AtomicBool,
     finished: AtomicBool,
     dropped: AtomicUsize,
+    encoded_us: AtomicI64,
+    saved_file: Mutex<Option<PathBuf>>,
 }
 
 impl State {
@@ -80,6 +82,8 @@ impl Output {
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             dropped: AtomicUsize::new(0),
+            encoded_us: AtomicI64::new(0),
+            saved_file: Mutex::new(None),
         });
         let worker_state = Arc::clone(&state);
         ACTIVE_WORKERS.fetch_add(1, Relaxed);
@@ -117,6 +121,19 @@ impl Output {
         status.clone()
     }
 
+    pub fn encoded_time(&self) -> Duration {
+        Duration::from_micros(self.state.encoded_us.load(Relaxed) as u64)
+    }
+
+    pub fn stop(&mut self) {
+        self.state.stop.store(true, Relaxed);
+        self.sender.take();
+    }
+
+    pub fn recording_result(&self) -> Result<PathBuf, String> {
+        self.state.saved_file.lock().unwrap().clone().ok_or_else(|| self.status())
+    }
+
     pub fn finished(&self) -> bool {
         self.state.finished.load(Acquire)
     }
@@ -124,8 +141,7 @@ impl Output {
 
 impl Drop for Output {
     fn drop(&mut self) {
-        self.state.stop.store(true, Relaxed);
-        self.sender.take();
+        self.stop();
     }
 }
 
@@ -260,6 +276,7 @@ fn run_stream(mut command: Command, mut receiver: Receiver<Vec<f32>>, state: &St
         if state.stop.load(Relaxed) {
             return;
         }
+        state.encoded_us.store(0, Relaxed);
         if let Err(error) = result {
             state.set_status(format!("{error} · försöker igen…"));
         } else {
@@ -334,7 +351,10 @@ fn run_record(
         false,
     );
     match result {
-        Ok(()) => state.set_status(format!("Sparad · {filename}")),
+        Ok(()) => {
+            state.set_status(format!("Sparad · {filename}"));
+            *state.saved_file.lock().unwrap() = Some(path);
+        }
         Err(error) => {
             if fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0) {
                 let _ = fs::remove_file(&path);
@@ -681,6 +701,7 @@ fn monitor(
             if last_progress == 0 && stopping_since.is_none() {
                 state.set_status(active_status);
             }
+            state.encoded_us.store(current_progress, Relaxed);
             last_progress = current_progress;
             stalled_since = None;
         }

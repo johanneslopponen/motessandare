@@ -90,7 +90,7 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
     let streams = [Output::stream(&opus_dest, 1), Output::stream(&mp3_dest, 1)];
     let folder = tempfile::tempdir().unwrap();
     let formats = [("WAV", 24), ("FLAC", 24), ("Opus", 96), ("MP3", 128)];
-    let recordings: Vec<_> = formats
+    let mut recordings: Vec<_> = formats
         .iter()
         .map(|(format, quality)| {
             let settings = Recording {
@@ -122,7 +122,9 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
     }
     let stream_status: Vec<_> = streams.iter().map(Output::status).collect();
     drop(streams);
-    drop(recordings);
+    for recording in &mut recordings {
+        recording.stop();
+    }
     wait_for_shutdown();
     assert_eq!(opus_connections, 2, "{stream_status:?}");
     assert_eq!(mp3_connections, 1, "{stream_status:?}");
@@ -132,6 +134,13 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
         .map(|item| item.unwrap().path())
         .collect();
     assert_eq!(paths.len(), formats.len());
+    for (recording, (format, _)) in recordings.iter().zip(formats) {
+        assert!(recording.finished());
+        assert!(!recording.encoded_time().is_zero());
+        let path = recording.recording_result().unwrap();
+        assert!(paths.contains(&path));
+        assert_eq!(path.extension().unwrap(), format.to_ascii_lowercase().as_str());
+    }
     for (index, (format, _)) in formats.iter().enumerate() {
         let extension = format.to_ascii_lowercase();
         let path = paths
