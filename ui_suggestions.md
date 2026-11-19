@@ -8,14 +8,14 @@ Avstämningen gäller arbetskopian efter ändringarna i mötesöversikten och in
 |---|---|---|
 | Navigation | 1.1, 1.3, 1.5. Flikarna ligger tillsammans och verktygsraden följer vyn. | 1.2 och 1.4. Från en ljudkälla leder **Redigera** fortfarande till hela destinationslistan. Det saknas en direkt väg tillbaka till samma källa. |
 | Under mötet | 2.1, 2.2, 2.4. Toppfältet har kompakta ikoner, grupprubriker när de ryms, stoppbekräftelse med antal och förklaringar för inaktiva startknappar. 2.5 visar antalet anslutna mål och namnger mål med problem. | 2.3 visar inspelningstid. Sändningstid återstår. 2.6 lyfter fram saknad ljudingång, problem per mål och avslutade inspelningar med fel. En generell indelning av motorns meddelanden efter allvarlighetsgrad återstår. 2.7 är avprioriterad enligt användarens önskemål. |
-| Nivåmätare | 3.1, 3.3, 3.4. Mätarna har dB-skala och färggradient med gränser i dB. | 3.2 och 3.5. Korta toppar kan fortfarande passera mellan två blickar. Ett kompakt läge för många källor återstår också. |
-| Inställningar | 4.4. Lösenordet kan visas och döljas. Ljudenheterna uppdateras automatiskt. | 4.1–4.3, 4.5, 4.7 och 4.8 återstår. För 4.6 saknas kanalantal i enhetslistan. För 4.9 förklaras låsningen under drift, men den gäller hela formuläret. Filvisningen i stoppdialogen är genomförd. Mappval i inställningarna är en separat punkt. |
-| Spara och återkoppla | 5.1–5.3. Ctrl/Cmd+S sparar, knappen visar **Sparat** och ändringsstatusen ligger intill. | 5.4 och 5.5. Ett tydligare felmeddelande med egen bakgrund och möjlighet att ångra borttagning återstår. |
+| Nivåmätare | 3.1–3.5. Mätarna har dB-skala, färggradient, topphållning och en klippindikator som kvitteras manuellt. Kompakt översikt ger mer plats åt flera källor. | — |
+| Inställningar | 4.1, 4.2 och 4.4. Inspelningsmappen går att välja eller öppna från formuläret. Serveradress, monteringspunkt och tom inspelningsmapp får återkoppling vid fältet. Lösenordet kan visas och döljas. Ljudenheterna uppdateras automatiskt. | 4.3, 4.5, 4.7 och 4.8 återstår. För 4.6 saknas kanalantal i enhetslistan. För 4.9 förklaras låsningen under drift, men den gäller hela formuläret. |
+| Spara och återkoppla | 5.1–5.3. Ändringar sparas efter 500 ms utan nya ändringar. Verktygsraden visar **Sparat** och Ctrl/Cmd+S kan fortfarande spara direkt. | 5.4 och 5.5. Ett tydligare felmeddelande med egen bakgrund och möjlighet att ångra borttagning återstår. |
 | Utseende | Gemensamma knappar för huvudvyerna, röd bekräftelse för borttagning och en egen accentfärg för sändningsstopp. | Fasta formulärbredder och lokalt valda textstorlekar och avstånd finns kvar. Appen saknar manuellt temaval. |
 | Tillgänglighet | De egendefinierade knapparna har roller, namn och synliga fokusmarkeringar. | Bygget aktiverar inte eframes AccessKit-stöd. Skärmläsarintegrationen behöver aktiveras och provas i den körande appen. |
 | Prestanda och underhåll | Gränssnittet uppdateras mer sällan i vila. | Huvuddelen av gränssnittet ligger fortfarande i ui.rs. Stoppdialogen har en egen modul. |
 
-**Förslag till nästa omgång.** Prioritera en kvarstående klippindikator på varje mätare (3.2), så att teknikern kan se en kort överstyrning i efterhand och kvittera den. Därefter skulle direktredigering av valt sändningsmål med återgång till källan (1.4) spara orientering när något behöver justeras.
+**Förslag till nästa omgång.** Direktredigering av valt sändningsmål med återgång till källan (1.4) skulle spara orientering när något behöver justeras.
 
 ## Ursprunglig förslagslista
 

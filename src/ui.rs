@@ -1,3 +1,4 @@
+use crate::engine::MeterLevel;
 use crate::{Destination, Engine, Settings, Source, settings_load, settings_save};
 use eframe::egui::{
     self, Align, Color32, ColorImage, ComboBox, Context, CornerRadius, FontData, FontDefinitions,
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const STRONG_FONT: &str = "strong";
 const SAVED_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 const SAVE_SHORTCUT: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
@@ -163,14 +165,15 @@ impl Palette {
 
 #[derive(Clone, Copy)]
 enum Icon {
+    Help,
     Broadcast,
     BroadcastStop,
     Record,
     RecordStop,
     Stop,
     Settings,
+    Folder,
     Plus,
-    Save,
     Check,
 }
 
@@ -187,19 +190,42 @@ enum StopConfirm {
     Recordings,
 }
 
+#[derive(Default)]
+enum SaveState {
+    #[default]
+    Idle,
+    Pending(Instant),
+    Saved(Instant),
+    Failed(String),
+}
+
+impl SaveState {
+    fn changed(&mut self, now: Instant) {
+        *self = Self::Pending(now + AUTOSAVE_DELAY);
+    }
+
+    fn dirty(&self) -> bool {
+        matches!(self, Self::Pending(_) | Self::Failed(_))
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        matches!(self, Self::Pending(deadline) if now >= *deadline)
+    }
+}
+
 pub struct Ui {
     saved_recordings: std::collections::VecDeque<crate::recording_dialog::SavedRecording>,
     engine: Engine,
     settings: Settings,
     selected_source: Option<u64>,
     view: View,
-    dirty: bool,
-    saved_at: Option<Instant>,
+    save_state: SaveState,
     notice: Option<String>,
     remove_source: bool,
     remove_destination: Option<u64>,
     new_destination_draft: Option<Destination>,
     confirm_stop: Option<StopConfirm>,
+    help_open: bool,
     app_icon: Option<TextureHandle>,
     close_blocked: bool,
     load_blocked: bool,
@@ -210,7 +236,10 @@ impl Ui {
         configure_fonts(ctx);
         ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
         ctx.set_visuals_of(egui::Theme::Light, build_visuals(false));
-        ctx.style_mut(|style| {
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size += 1.5;
+            }
             style.spacing.item_spacing = Vec2::new(10.0, 8.0);
             style.spacing.button_padding = Vec2::new(11.0, 6.0);
             style.spacing.interact_size.y = 28.0;
@@ -234,14 +263,14 @@ impl Ui {
             settings,
             selected_source,
             view: View::Overview,
-            dirty: false,
-            saved_at: None,
+            save_state: SaveState::Idle,
             saved_recordings: Default::default(),
             notice,
             remove_source: false,
             remove_destination: None,
             new_destination_draft: None,
             confirm_stop: None,
+            help_open: false,
             app_icon,
             close_blocked: false,
             load_blocked,
@@ -268,7 +297,7 @@ impl Ui {
         });
         self.selected_source = Some(id);
         self.navigate(View::SourceSettings);
-        self.dirty = true;
+        self.save_state.changed(Instant::now());
         self.engine.update(&self.settings.sources);
     }
 
@@ -283,7 +312,7 @@ impl Ui {
             ..Destination::default()
         });
         self.navigate(View::Destinations);
-        self.dirty = true;
+        self.save_state.changed(Instant::now());
     }
 
     fn destination_streaming(&self, destination_id: u64) -> bool {
@@ -295,27 +324,11 @@ impl Ui {
     fn save(&mut self) {
         match settings_save(&self.settings) {
             Ok(()) => {
-                self.notice = None;
-                self.dirty = false;
                 self.close_blocked = false;
-                self.saved_at = Some(Instant::now());
+                self.save_state = SaveState::Saved(Instant::now());
             }
-            Err(err) => self.notice = Some(format!("Inställningarna kunde inte sparas. {err}")),
+            Err(err) => self.save_state = SaveState::Failed(err),
         }
-    }
-
-    fn saved_feedback_remaining(&mut self) -> Option<Duration> {
-        let remaining = self.saved_at.and_then(|at| {
-            if self.dirty {
-                None
-            } else {
-                SAVED_FEEDBACK_DURATION.checked_sub(at.elapsed())
-            }
-        });
-        if remaining.is_none() {
-            self.saved_at = None;
-        }
-        remaining
     }
 
     fn repaint_interval(&self) -> Duration {
@@ -522,6 +535,13 @@ impl Ui {
                 );
             }
             ui.label(strong_text("Mötessändare", 18.0, palette.text_primary));
+            if icon_button(
+                ui, Icon::Help, true, palette.text_secondary, false, palette, "Visa användarguiden",
+            )
+            .clicked()
+            {
+                self.help_open = true;
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.set_height(36.0);
@@ -660,6 +680,15 @@ impl Ui {
                         }
                     }
                 }
+            });
+        }
+        if let SaveState::Failed(error) = &self.save_state {
+            let message = format!("Inställningarna kunde inte sparas. {error}");
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(palette.warning, message);
+                if text_button(ui, "Försök igen", true, ButtonVariant::Neutral, palette).clicked() {
+                    self.save();
+                }
                 if self.close_blocked
                     && text_button(
                         ui,
@@ -670,7 +699,7 @@ impl Ui {
                     )
                     .clicked()
                 {
-                    self.dirty = false;
+                    self.save_state = SaveState::Idle;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -684,7 +713,7 @@ impl eframe::App for Ui {
 
         if !self.load_blocked
             && ctx.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
-            && self.dirty
+            && self.save_state.dirty()
         {
             self.save();
         }
@@ -740,45 +769,6 @@ impl eframe::App for Ui {
                         ui.set_height(30.0);
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        let save_label = "Spara inställningar";
-                        let show_saved = !self.dirty && self.saved_feedback_remaining().is_some();
-                        if show_saved {
-                            let save_min_width = button_width(ui, true, save_label, 13.5, 11.0);
-                            saved_button(ui, "Sparat", save_min_width, palette);
-                        } else {
-                            let save_variant = if self.dirty {
-                                ButtonVariant::Primary
-                            } else {
-                                ButtonVariant::Neutral
-                            };
-                            let save_icon_color = if self.dirty {
-                                palette.tab_active_fg
-                            } else {
-                                palette.text_disabled
-                            };
-                            if action_button(
-                                ui,
-                                Icon::Save,
-                                save_label,
-                                self.dirty,
-                                save_icon_color,
-                                save_variant,
-                                palette,
-                            )
-                            .clicked()
-                            {
-                                self.save();
-                            }
-                        }
-
-                        if self.dirty {
-                            ui.label(
-                                RichText::new("Osparade ändringar")
-                                    .size(12.5)
-                                    .color(palette.warning),
-                            );
-                        }
-
                         if self.view != View::Destinations
                             && action_button(
                                 ui,
@@ -793,6 +783,16 @@ impl eframe::App for Ui {
                         {
                             self.add_source();
                         }
+
+                        match self.save_state {
+                            SaveState::Pending(_) => {
+                                ui.weak("Sparar snart…");
+                            }
+                            SaveState::Saved(at) if at.elapsed() < SAVED_FEEDBACK_DURATION => {
+                                saved_button(ui, "Sparat", palette);
+                            }
+                            _ => {}
+                        }
                     });
                 });
 
@@ -805,6 +805,11 @@ impl eframe::App for Ui {
                             return;
                         }
                         let mut open_settings_id = None;
+                        let mut compact = self.settings.compact_overview.unwrap_or(self.settings.sources.len() >= 4);
+                        if ui.checkbox(&mut compact, "Kompakt översikt").changed() {
+                            self.settings.compact_overview = Some(compact);
+                            self.save_state.changed(Instant::now());
+                        }
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -818,6 +823,7 @@ impl eframe::App for Ui {
                                             self.engine.streaming(source.id),
                                             self.engine.recording(source.id),
                                             true,
+                                            compact,
                                             palette,
                                         );
                                         if clicked_settings {
@@ -852,6 +858,7 @@ impl eframe::App for Ui {
                         let Settings {
                             destinations,
                             sources,
+                            ..
                         } = &mut self.settings;
                         let source = &mut sources[index];
                         ScrollArea::vertical()
@@ -864,6 +871,7 @@ impl eframe::App for Ui {
                                     destinations,
                                     streaming,
                                     recording,
+                                    false,
                                     false,
                                     palette,
                                 );
@@ -949,7 +957,7 @@ impl eframe::App for Ui {
                             self.navigate(View::Overview);
                         }
                         if outcome.changed || removed {
-                            self.dirty = true;
+                            self.save_state.changed(Instant::now());
                             self.engine.update(&self.settings.sources);
                         }
                     }
@@ -1136,7 +1144,7 @@ impl eframe::App for Ui {
                             changed = true;
                         }
                         if changed {
-                            self.dirty = true;
+                            self.save_state.changed(Instant::now());
                             self.engine.update(&self.settings.sources);
                         }
                     }
@@ -1150,23 +1158,39 @@ impl eframe::App for Ui {
             }
         }
         if self.confirm_stop.is_some() {
+            self.help_open = false;
             self.stop_confirm_modal(ctx, palette);
-        } else if let Some(recording) = self.saved_recordings.front_mut()
-            && recording.show(ctx)
-        {
-            self.saved_recordings.pop_front();
+        } else if let Some(recording) = self.saved_recordings.front_mut() {
+            self.help_open = false;
+            if recording.show(ctx) {
+                self.saved_recordings.pop_front();
+            }
+        } else if self.help_open && crate::guide::show(ctx) {
+            self.help_open = false;
         }
 
-        if self.dirty && ctx.input(|input| input.viewport().close_requested()) {
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        let now = Instant::now();
+        if self.save_state.due(now) || (closing && self.save_state.dirty()) {
             self.save();
-            if self.dirty {
+            if closing && self.save_state.dirty() {
                 self.close_blocked = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
         }
         let mut repaint_after = self.repaint_interval();
-        if let Some(remaining) = self.saved_feedback_remaining() {
-            repaint_after = repaint_after.min(remaining);
+        match self.save_state {
+            SaveState::Pending(deadline) => {
+                repaint_after = repaint_after.min(deadline.saturating_duration_since(now));
+            }
+            SaveState::Saved(at) => {
+                if let Some(remaining) = SAVED_FEEDBACK_DURATION.checked_sub(at.elapsed()) {
+                    repaint_after = repaint_after.min(remaining);
+                } else {
+                    self.save_state = SaveState::Idle;
+                }
+            }
+            _ => {}
         }
         ctx.request_repaint_after(repaint_after);
     }
@@ -1330,6 +1354,10 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let r = rect.width().min(rect.height()) * 0.5;
 
     match icon {
+        Icon::Help => {
+            painter.circle_stroke(c, r * 0.93, Stroke::new(1.3, color));
+            painter.text(c, egui::Align2::CENTER_CENTER, "?", FontId::proportional(r * 1.55), color);
+        }
         Icon::Broadcast => {
             painter.circle_filled(c, (r * 0.22).max(1.8), color);
             paint_arc(painter, c, r * 0.54, -0.68, 0.68, Stroke::new(1.6, color));
@@ -1392,6 +1420,21 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let sq = Rect::from_center_size(c, Vec2::splat(r * 1.18));
             painter.rect_filled(sq, CornerRadius::same(2), color);
         }
+        Icon::Folder => {
+            let outline = [
+                (-0.9, -0.65),
+                (-0.25, -0.65),
+                (0.0, -0.35),
+                (0.9, -0.35),
+                (0.9, 0.65),
+                (-0.9, 0.65),
+            ];
+            let points = outline
+                .into_iter()
+                .map(|(x, y)| c + Vec2::new(x * r, y * r))
+                .collect();
+            painter.add(Shape::closed_line(points, Stroke::new(1.5, color)));
+        }
         Icon::Settings => {
             // 3 horizontal slider tracks with staggered knobs
             let stroke = Stroke::new(1.4, color);
@@ -1411,31 +1454,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([Pos2::new(c.x - d, c.y), Pos2::new(c.x + d, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x, c.y - d), Pos2::new(c.x, c.y + d)], stroke);
         }
-        Icon::Save => {
-            // Minimalist save / diskette outline
-            let outer = Rect::from_center_size(c, Vec2::splat(r * 1.48));
-            painter.rect_stroke(
-                outer,
-                CornerRadius::same(2),
-                Stroke::new(1.4, color),
-                egui::StrokeKind::Inside,
-            );
-            let top = Rect::from_min_max(
-                Pos2::new(outer.left() + r * 0.32, outer.top()),
-                Pos2::new(outer.right() - r * 0.32, outer.top() + r * 0.56),
-            );
-            painter.rect_stroke(
-                top,
-                CornerRadius::same(1),
-                Stroke::new(1.2, color),
-                egui::StrokeKind::Inside,
-            );
-            let bottom = Rect::from_min_max(
-                Pos2::new(outer.left() + r * 0.32, outer.bottom() - r * 0.54),
-                Pos2::new(outer.right() - r * 0.32, outer.bottom()),
-            );
-            painter.rect_filled(bottom, CornerRadius::same(1), color);
-        }
+
         Icon::Check => {
             let stroke = Stroke::new(1.8, color);
             let points = vec![
@@ -1626,19 +1645,6 @@ struct ButtonSpec<'a> {
     height: f32,
     font_size: f32,
     pad_x: f32,
-    min_width: Option<f32>,
-}
-
-fn button_width(ui: &EguiUi, has_icon: bool, label: &str, font_size: f32, pad_x: f32) -> f32 {
-    let font_id = FontId::proportional(font_size);
-    let text_galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font_id, Color32::PLACEHOLDER);
-    if has_icon {
-        pad_x + BUTTON_ICON_SIZE + BUTTON_ICON_GAP + text_galley.size().x + pad_x
-    } else {
-        pad_x + text_galley.size().x + pad_x
-    }
 }
 
 fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egui::Response {
@@ -1653,10 +1659,7 @@ fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egu
     } else {
         text_galley.size().x
     };
-    let natural_width = content_width + spec.pad_x * 2.0;
-    let width = spec
-        .min_width
-        .map_or(natural_width, |min_w| natural_width.max(min_w));
+    let width = content_width + spec.pad_x * 2.0;
 
     let sense = if is_enabled {
         Sense::click()
@@ -1772,7 +1775,7 @@ fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egu
     response
 }
 
-fn saved_button(ui: &mut EguiUi, label: &str, min_width: f32, palette: Palette) -> egui::Response {
+fn saved_button(ui: &mut EguiUi, label: &str, palette: Palette) -> egui::Response {
     render_button(
         ui,
         ButtonSpec {
@@ -1784,7 +1787,6 @@ fn saved_button(ui: &mut EguiUi, label: &str, min_width: f32, palette: Palette) 
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
-            min_width: Some(min_width),
         },
         palette,
     )
@@ -1810,7 +1812,6 @@ fn action_button(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
-            min_width: None,
         },
         palette,
     )
@@ -1834,7 +1835,6 @@ fn text_button(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
-            min_width: None,
         },
         palette,
     )
@@ -1858,7 +1858,6 @@ fn neutral_button_colored(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
-            min_width: None,
         },
         palette,
     )
@@ -1882,7 +1881,6 @@ fn compact_button(
             height: 25.0,
             font_size: 12.5,
             pad_x: 9.0,
-            min_width: None,
         },
         palette,
     )
@@ -2075,6 +2073,7 @@ fn source_card(
     streaming: bool,
     recording: bool,
     show_settings_button: bool,
+    compact: bool,
     palette: Palette,
 ) -> bool {
     let mut open_settings = false;
@@ -2087,16 +2086,31 @@ fn source_card(
         palette.card_border
     };
 
-    card_frame(palette, border_color).show(ui, |ui| {
+    let mut frame = card_frame(palette, border_color);
+    if compact {
+        frame = frame.inner_margin(Margin::symmetric(10, 6));
+    }
+    frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
+        if compact {
+            ui.spacing_mut().item_spacing.y = 3.0;
+        }
 
         // Card header: title + active badges on left, settings button on right
         ui.horizontal_wrapped(|ui| {
-            ui.label(strong_text(display_name(source), 16.5, palette.text_primary));
+            ui.label(strong_text(
+                display_name(source),
+                16.5,
+                palette.text_primary,
+            ));
             if streaming {
                 status_pill(
                     ui,
-                    if live.connected > 0 { "Sänder" } else { "Sändning begärd" },
+                    if live.connected > 0 {
+                        "Sänder"
+                    } else {
+                        "Sändning begärd"
+                    },
                     palette.stream_pill_bg,
                     palette.stream_active_border,
                     palette.stream_accent,
@@ -2110,14 +2124,36 @@ fn source_card(
                         live.elapsed.as_secs() / 3600,
                         live.elapsed.as_secs() / 60 % 60,
                         live.elapsed.as_secs() % 60,
-                    )).monospace(),
+                    ))
+                    .monospace(),
                     palette.record_pill_bg,
                     palette.record_active_border,
                     palette.record_accent,
                 );
             }
 
-            if show_settings_button {
+            if compact {
+                source_output_controls(
+                    ui,
+                    engine,
+                    source,
+                    destinations,
+                    streaming,
+                    recording,
+                    true,
+                    palette,
+                );
+                open_settings = icon_button(
+                    ui,
+                    Icon::Settings,
+                    true,
+                    palette.text_secondary,
+                    false,
+                    palette,
+                    "Inställningar",
+                )
+                .clicked();
+            } else if show_settings_button {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if action_button(
                         ui,
@@ -2136,13 +2172,14 @@ fn source_card(
             }
         });
 
-        // Subtle divider inside the card
-        ui.add_space(4.0);
-        let (sep_rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-        ui.painter()
-            .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
-        ui.add_space(6.0);
+        if !compact {
+            ui.add_space(4.0);
+            let (sep_rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter()
+                .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
+            ui.add_space(6.0);
+        }
 
         let present = engine.present(source.id);
 
@@ -2161,104 +2198,190 @@ fn source_card(
             ui.label(RichText::new(message).strong().color(palette.warning));
         }
         if live.total > 0 {
-            ui.label(format!("{} av {} sändningsmål anslutna", live.connected, live.total))
-                .on_hover_text(live.targets.join("\n"));
+            ui.label(format!(
+                "{} av {} sändningsmål anslutna",
+                live.connected, live.total
+            ))
+            .on_hover_text(live.targets.join("\n"));
             for detail in &live.issues {
                 ui.colored_label(palette.warning, detail);
             }
         }
         if !live.record_detail.is_empty() {
-            let color = if recording { palette.text_secondary } else { palette.warning };
+            let color = if recording {
+                palette.text_secondary
+            } else {
+                palette.warning
+            };
             ui.label(RichText::new(&live.record_detail).size(12.5).color(color));
         }
 
-        let (left, right) = if present {
-            engine.level(source.id)
-        } else {
-            (0.0, 0.0)
-        };
+        let mut levels = engine.levels(source.id);
+        if !present {
+            for level in &mut levels {
+                level.signal = 0.0;
+            }
+        }
+        let stereo = source.right.is_some();
         ui.push_id(source.id, |ui| {
-            if source.right.is_some() {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                meter(ui, "Vänster", left, false, palette);
-                meter(ui, "Höger", right, true, palette);
+            if compact {
+                compact_meter(ui, &levels[..if stereo { 2 } else { 1 }], palette);
             } else {
-                meter(ui, "Mono", left, true, palette);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                meter(
+                    ui,
+                    if stereo { "Vänster" } else { "Mono" },
+                    levels[0],
+                    !stereo,
+                    palette,
+                );
+                if stereo {
+                    meter(ui, "Höger", levels[1], true, palette);
+                }
+            }
+            for (channel, level) in levels.iter().take(if stereo { 2 } else { 1 }).enumerate() {
+                if level.clipped {
+                    let label = match (stereo, channel) {
+                        (true, 0) => "Klippning vänster · Återställ",
+                        (true, _) => "Klippning höger · Återställ",
+                        _ => "Klippning · Återställ",
+                    };
+                    if compact_button(ui, label, true, Some(palette.danger), palette).clicked() {
+                        engine.reset_clip(source.id, channel);
+                    }
+                }
             }
         });
 
-        ui.add_space(4.0);
-
-        let count = source.resolve_destinations(destinations).len();
-        ui.horizontal_wrapped(|ui| {
-            let stream_enabled = streaming || (!source.device.is_empty() && count > 0);
-            let stream_reason = source_stream_disabled_reason(source, count, streaming);
-            let (stream_icon, stream_label, stream_variant) = if streaming {
-                (Icon::Stop, "Stoppa sändning", ButtonVariant::StreamActive)
-            } else {
-                (Icon::Broadcast, "Starta sändning", ButtonVariant::Neutral)
-            };
-            if with_disabled_reason(
-                action_button(
+        if !compact {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                source_output_controls(
                     ui,
-                    stream_icon,
-                    stream_label,
-                    stream_enabled,
-                    palette.stream_accent,
-                    stream_variant,
+                    engine,
+                    source,
+                    destinations,
+                    streaming,
+                    recording,
+                    false,
                     palette,
-                ),
-                stream_enabled,
-                stream_reason,
-            )
-            .clicked()
-            {
-                engine.set_stream(source, destinations, !streaming);
-            }
-
-            let record_enabled = recording
-                || (!source.device.is_empty() && !source.recording.folder.trim().is_empty());
-            let record_reason = source_record_disabled_reason(source, recording);
-            let (record_icon, record_label, record_variant) = if recording {
-                (Icon::Stop, "Stoppa inspelning", ButtonVariant::RecordActive)
-            } else {
-                (Icon::Record, "Starta inspelning", ButtonVariant::Neutral)
-            };
-            if with_disabled_reason(
-                action_button(
-                    ui,
-                    record_icon,
-                    record_label,
-                    record_enabled,
-                    palette.record_accent,
-                    record_variant,
-                    palette,
-                ),
-                record_enabled,
-                record_reason,
-            )
-            .clicked()
-            {
-                engine.set_record(source, !recording);
-            }
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                status_pill(
-                    ui,
-                    if count == 1 {
-                        "1 destination".to_owned()
-                    } else {
-                        format!("{count} destinationer")
-                    },
-                    palette.pill_bg,
-                    palette.pill_border,
-                    palette.text_secondary,
                 );
             });
-        });
+        }
     });
-
     open_settings
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_output_controls(
+    ui: &mut EguiUi,
+    engine: &Engine,
+    source: &Source,
+    destinations: &[Destination],
+    streaming: bool,
+    recording: bool,
+    compact: bool,
+    palette: Palette,
+) {
+    let count = source.resolve_destinations(destinations).len();
+    let stream_enabled = streaming || (!source.device.is_empty() && count > 0);
+    let stream_reason = source_stream_disabled_reason(source, count, streaming);
+    let (stream_icon, stream_label, stream_variant) = if streaming {
+        (Icon::Stop, "Stoppa sändning", ButtonVariant::StreamActive)
+    } else {
+        (Icon::Broadcast, "Starta sändning", ButtonVariant::Neutral)
+    };
+    if with_disabled_reason(
+        if compact {
+            icon_button(
+                ui,
+                if streaming {
+                    Icon::BroadcastStop
+                } else {
+                    Icon::Broadcast
+                },
+                stream_enabled,
+                palette.stream_accent,
+                false,
+                palette,
+                stream_label,
+            )
+        } else {
+            action_button(
+                ui,
+                stream_icon,
+                stream_label,
+                stream_enabled,
+                palette.stream_accent,
+                stream_variant,
+                palette,
+            )
+        },
+        stream_enabled,
+        stream_reason,
+    )
+    .clicked()
+    {
+        engine.set_stream(source, destinations, !streaming);
+    }
+
+    let record_enabled =
+        recording || (!source.device.is_empty() && !source.recording.folder.trim().is_empty());
+    let record_reason = source_record_disabled_reason(source, recording);
+    let (record_icon, record_label, record_variant) = if recording {
+        (Icon::Stop, "Stoppa inspelning", ButtonVariant::RecordActive)
+    } else {
+        (Icon::Record, "Starta inspelning", ButtonVariant::Neutral)
+    };
+    if with_disabled_reason(
+        if compact {
+            icon_button(
+                ui,
+                if recording {
+                    Icon::RecordStop
+                } else {
+                    Icon::Record
+                },
+                record_enabled,
+                palette.record_accent,
+                false,
+                palette,
+                record_label,
+            )
+        } else {
+            action_button(
+                ui,
+                record_icon,
+                record_label,
+                record_enabled,
+                palette.record_accent,
+                record_variant,
+                palette,
+            )
+        },
+        record_enabled,
+        record_reason,
+    )
+    .clicked()
+    {
+        engine.set_record(source, !recording);
+    }
+
+    if !compact {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            status_pill(
+                ui,
+                if count == 1 {
+                    "1 destination".to_owned()
+                } else {
+                    format!("{count} destinationer")
+                },
+                palette.pill_bg,
+                palette.pill_border,
+                palette.text_secondary,
+            );
+        });
+    }
 }
 
 const METER_MIN_DB: f32 = -60.0;
@@ -2467,7 +2590,100 @@ fn paint_meter_scale(painter: &egui::Painter, bar_rect: Rect, scale_top: f32, pa
     }
 }
 
-fn meter(ui: &mut EguiUi, label: &str, signal: f32, show_scale: bool, palette: Palette) {
+fn paint_meter_bar(
+    ui: &EguiUi,
+    bar_rect: Rect,
+    level: MeterLevel,
+    show_ticks: bool,
+    palette: Palette,
+) {
+    let painter = ui.painter();
+    let rounding = CornerRadius::same(3);
+    painter.rect_filled(bar_rect, rounding, palette.meter_track);
+
+    let fill_rect = bar_rect.shrink(1.0);
+    let frac = meter_fraction(level.signal);
+    if frac > 0.002 && fill_rect.width() > 0.0 {
+        let effective_frac = frac.max(2.0 / fill_rect.width()).min(1.0);
+        let mesh = build_meter_gradient_mesh(fill_rect, effective_frac, palette);
+        painter.add(Shape::mesh(mesh));
+    }
+
+    if show_ticks {
+        for &tick_db in METER_TICKS_DB {
+            if tick_db <= METER_MIN_DB || tick_db >= METER_MAX_DB {
+                continue;
+            }
+            let tick_frac = db_to_meter_fraction(tick_db);
+            let x = fill_rect.left() + fill_rect.width() * tick_frac;
+            let major = METER_SCALE_LABELS
+                .iter()
+                .any(|&(label_db, _)| (label_db - tick_db).abs() < 0.01);
+            let covered = frac > 0.002 && tick_frac <= frac;
+            let tick_color = match (major, covered) {
+                (true, true) => palette.meter_track.gamma_multiply(0.6),
+                (true, false) => palette.text_disabled.gamma_multiply(0.5),
+                (false, true) => palette.meter_track.gamma_multiply(0.4),
+                (false, false) => palette.text_disabled.gamma_multiply(0.32),
+            };
+            let top_y = if major {
+                fill_rect.top() + 0.5
+            } else {
+                fill_rect.center().y
+            };
+            painter.line_segment(
+                [Pos2::new(x, top_y), Pos2::new(x, fill_rect.bottom() - 0.5)],
+                Stroke::new(1.0, tick_color),
+            );
+        }
+    }
+    painter.rect_stroke(
+        bar_rect,
+        rounding,
+        Stroke::new(1.0, palette.meter_border),
+        egui::StrokeKind::Inside,
+    );
+
+    if level.held >= 0.001 {
+        let x = fill_rect.left() + meter_fraction(level.held) * fill_rect.width();
+        painter.line_segment(
+            [
+                Pos2::new(x, fill_rect.top()),
+                Pos2::new(x, fill_rect.bottom()),
+            ],
+            Stroke::new(2.0, palette.text_primary),
+        );
+    }
+}
+
+fn compact_meter(ui: &mut EguiUi, levels: &[MeterLevel], palette: Palette) {
+    // Stereo lanes share one strip, with left above right.
+    let height = 6.0;
+    let total_height = if levels.len() == 2 {
+        2.0 * height + 1.0
+    } else {
+        height
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), total_height),
+        Sense::hover(),
+    );
+    for (index, &level) in levels.iter().enumerate() {
+        let lane = Rect::from_min_size(
+            rect.min + Vec2::new(0.0, index as f32 * (height + 1.0)),
+            Vec2::new(rect.width(), height),
+        );
+        paint_meter_bar(ui, lane, level, false, palette);
+    }
+    response.on_hover_text(if levels.len() == 2 {
+        "Vänster kanal överst, höger kanal nederst. Strecken visar toppnivån."
+    } else {
+        "Mono. Strecket visar toppnivån."
+    });
+}
+
+fn meter(ui: &mut EguiUi, label: &str, level: MeterLevel, show_scale: bool, palette: Palette) {
+    let signal = level.signal;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.spacing_mut().interact_size.y = 18.0;
@@ -2485,51 +2701,7 @@ fn meter(ui: &mut EguiUi, label: &str, signal: f32, show_scale: bool, palette: P
             let bar_width = (ui.available_width() - 82.0).max(40.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_width, 12.0), Sense::hover());
             bar_rect = rect;
-            let painter = ui.painter();
-            let rounding = CornerRadius::same(3);
-            painter.rect_filled(bar_rect, rounding, palette.meter_track);
-
-            let fill_rect = bar_rect.shrink(1.0);
-            let frac = meter_fraction(signal);
-            if frac > 0.002 && fill_rect.width() > 0.0 {
-                let effective_frac = frac.max(2.0 / fill_rect.width()).min(1.0);
-                let mesh = build_meter_gradient_mesh(fill_rect, effective_frac, palette);
-                painter.add(Shape::mesh(mesh));
-            }
-
-            for &tick_db in METER_TICKS_DB {
-                if tick_db <= METER_MIN_DB || tick_db >= METER_MAX_DB {
-                    continue;
-                }
-                let tick_frac = db_to_meter_fraction(tick_db);
-                let x = fill_rect.left() + fill_rect.width() * tick_frac;
-                let major = METER_SCALE_LABELS
-                    .iter()
-                    .any(|&(label_db, _)| (label_db - tick_db).abs() < 0.01);
-                let covered = frac > 0.002 && tick_frac <= frac;
-                let tick_color = match (major, covered) {
-                    (true, true) => palette.meter_track.gamma_multiply(0.6),
-                    (true, false) => palette.text_disabled.gamma_multiply(0.5),
-                    (false, true) => palette.meter_track.gamma_multiply(0.4),
-                    (false, false) => palette.text_disabled.gamma_multiply(0.32),
-                };
-                let top_y = if major {
-                    fill_rect.top() + 0.5
-                } else {
-                    fill_rect.center().y
-                };
-                painter.line_segment(
-                    [Pos2::new(x, top_y), Pos2::new(x, fill_rect.bottom() - 0.5)],
-                    Stroke::new(1.0, tick_color),
-                );
-            }
-
-            painter.rect_stroke(
-                bar_rect,
-                rounding,
-                Stroke::new(1.0, palette.meter_border),
-                egui::StrokeKind::Inside,
-            );
+            paint_meter_bar(ui, rect, level, true, palette);
 
             let text = if signal.is_finite() && signal >= 0.001 {
                 format!("{:.1} dBFS", 20.0 * signal.log10())
@@ -2579,7 +2751,7 @@ fn source_settings(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                outcome.changed |= field(ui, "Namn", &mut source.name, false);
+                outcome.changed |= field(ui, "Namn", &mut source.name).changed();
                 ui.label("Ljudenhet");
                 let mut device = source.device.clone();
                 let selected_name = devices
@@ -2593,20 +2765,27 @@ fn source_settings(
                             &source.device_name
                         }
                     });
-                ComboBox::from_id_salt("device")
-                    .width(260.0)
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
-                        if devices.is_empty() {
-                            ui.label(
-                                RichText::new("Inga ljudenheter tillgängliga")
-                                    .color(palette.text_secondary),
-                            );
-                        }
-                        for (id, name, _) in devices {
-                            ui.selectable_value(&mut device, id.clone(), name);
-                        }
-                    });
+                ui.scope(|ui| {
+                    ui.set_width(290.0);
+                    ComboBox::from_id_salt("device")
+                        .width(260.0)
+                        .truncate()
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            if devices.is_empty() {
+                                ui.label(
+                                    RichText::new("Inga ljudenheter tillgängliga")
+                                        .color(palette.text_secondary),
+                                );
+                            }
+                            for (id, name, _) in devices {
+                                ui.selectable_value(&mut device, id.clone(), name)
+                                    .on_hover_text(name);
+                            }
+                        })
+                        .response
+                        .on_hover_text(selected_name);
+                });
                 if device != source.device
                     && let Some((_, name, count)) = devices.iter().find(|(id, _, _)| id == &device)
                 {
@@ -2707,6 +2886,7 @@ fn source_settings(
                             let mut chosen = dest_id;
                             ComboBox::from_id_salt("dest-picker")
                                 .width(260.0)
+                                .truncate()
                                 .selected_text(destination_choice_label(current))
                                 .show_ui(ui, |ui| {
                                     for candidate in destinations.iter() {
@@ -2869,11 +3049,72 @@ fn source_settings(
         ui.set_width(ui.available_width());
         ui.label(strong_text("Lokal inspelning", 15.5, palette.text_primary));
         ui.add_space(4.0);
+        // Leave room for the label and both folder controls in a narrow window.
+        let folder_field_width = (ui.available_width() - 310.0).clamp(174.0, 248.0);
         egui::Grid::new("recording-fields")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                outcome.changed |= field(ui, "Mapp", &mut source.recording.folder, false);
+                let folder_label = ui.label("Mapp").id;
+                let error_id = ui.make_persistent_id("open-recording-folder-error");
+                let folder = &mut source.recording.folder;
+                ui.horizontal(|ui| {
+                    let input = ui
+                        .add(
+                            egui::TextEdit::singleline(folder)
+                                .margin(Margin::symmetric(6, 4))
+                                .desired_width(folder_field_width),
+                        )
+                        .labelled_by(folder_label);
+                    if input.changed() {
+                        outcome.changed = true;
+                        ui.data_mut(|data| data.remove::<String>(error_id));
+                    }
+                    if icon_button(
+                        ui,
+                        Icon::Folder,
+                        true,
+                        palette.text_secondary,
+                        false,
+                        palette,
+                        "Bläddra efter inspelningsmapp",
+                    )
+                    .clicked()
+                    {
+                        let mut picker = rfd::FileDialog::new().set_title("Välj inspelningsmapp");
+                        if !folder.is_empty() {
+                            picker = picker.set_directory(folder.as_str());
+                        }
+                        if let Some(path) = picker.pick_folder() {
+                            let selected = path.to_string_lossy();
+                            if selected != folder.as_str() {
+                                *folder = selected.into_owned();
+                                outcome.changed = true;
+                                ui.data_mut(|data| data.remove::<String>(error_id));
+                            }
+                        }
+                    }
+                    let empty = folder.trim().is_empty();
+                    if empty {
+                        mark_invalid(ui, &input, palette);
+                    }
+                    if compact_button(ui, "Öppna mapp", !empty, None, palette).clicked() {
+                        let error = open_recording_folder(folder).err();
+                        ui.data_mut(|data| {
+                            if let Some(error) = error {
+                                data.insert_temp(error_id, error);
+                            } else {
+                                data.remove::<String>(error_id);
+                            }
+                        });
+                    }
+                });
+                ui.end_row();
+                if folder.trim().is_empty() {
+                    field_hint(ui, "Välj en mapp för att kunna spela in.", palette);
+                } else if let Some(error) = ui.data(|data| data.get_temp::<String>(error_id)) {
+                    field_hint(ui, &error, palette);
+                }
                 ui.label("Filnamnsformat");
                 let current_preset = FILENAME_FORMATS
                     .iter()
@@ -2898,7 +3139,8 @@ fn source_settings(
                 outcome.changed |= ui
                     .add(
                         egui::TextEdit::singleline(&mut source.recording.filename_format)
-                            .desired_width(260.0),
+                            .margin(Margin::symmetric(6, 4))
+                            .desired_width(290.0),
                     )
                     .labelled_by(template_label)
                     .on_hover_text(
@@ -2980,10 +3222,16 @@ fn destination_settings(
         .num_columns(2)
         .spacing([12.0, 8.0])
         .show(ui, |ui| {
-            changed |= field(ui, "Namn", &mut destination.name, false);
-            changed |= field(ui, "Server-URL", &mut destination.server, false);
-            changed |= field(ui, "Monteringspunkt", &mut destination.mount, false);
-            changed |= field(ui, "Användarnamn", &mut destination.user, false);
+            changed |= field(ui, "Namn", &mut destination.name).changed();
+            changed |= validated_field(ui, "Server-URL", &mut destination.server, server_hint, palette);
+            changed |= validated_field(
+                ui,
+                "Monteringspunkt",
+                &mut destination.mount,
+                mount_hint,
+                palette,
+            );
+            changed |= field(ui, "Användarnamn", &mut destination.user).changed();
             let password_label = ui.label("Lösenord").id;
             let show_id = ui.make_persistent_id("show-password");
             let mut show_password =
@@ -2994,7 +3242,8 @@ fn destination_settings(
                     .add(
                         egui::TextEdit::singleline(&mut destination.password)
                             .password(!show_password)
-                            .desired_width(210.0),
+                            .margin(Margin::symmetric(6, 4))
+                            .desired_width(236.0),
                     )
                     .labelled_by(password_label)
                     .changed();
@@ -3036,18 +3285,103 @@ fn bitrate_range(format: &str) -> Option<std::ops::RangeInclusive<u32>> {
     }
 }
 
-fn field(ui: &mut EguiUi, label: &str, value: &mut String, secret: bool) -> bool {
+fn open_recording_folder(folder: &str) -> Result<(), String> {
+    let path = std::path::absolute(folder)
+        .map_err(|error| format!("Kunde inte läsa mappsökvägen. {error}"))?;
+    if !path.is_dir() {
+        return Err("Mappen finns inte. Kontrollera sökvägen eller välj en befintlig mapp.".into());
+    }
+    let opener = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Kunde inte öppna mappen. {error}"))
+}
+
+fn server_hint(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return Some("Ange en serveradress som börjar med http:// eller https://.");
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Some("Använd http:// eller https:// för Icecast.");
+    }
+    if rest.is_empty() || rest.starts_with(['/', '\\', '?', '#']) {
+        return Some("Ange serverns värdnamn eller IP-adress.");
+    }
+    if rest.split(['/', '?', '#']).next().is_some_and(|authority| authority.ends_with(':')) {
+        return Some("Ange en port efter kolon eller ta bort kolon.");
+    }
+    match url::Url::parse(value) {
+        Ok(url) if url.port() == Some(0) => Some("Ange en port mellan 1 och 65535."),
+        Err(url::ParseError::InvalidPort) => Some("Ange en port mellan 1 och 65535."),
+        Ok(url) if url.has_host() => None,
+        _ => Some("Kontrollera serverns värdnamn eller IP-adress."),
+    }
+}
+
+fn mount_hint(value: &str) -> Option<&'static str> {
+    let mount = value.trim();
+    if !mount.starts_with('/') || mount.trim_start_matches('/').is_empty() {
+        Some("Börja med / och ange ett namn, till exempel /live.")
+    } else if mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
+        Some("Ta bort frågetecken, nummertecken och kontrolltecken.")
+    } else {
+        None
+    }
+}
+
+fn mark_invalid(ui: &EguiUi, field: &egui::Response, palette: Palette) {
+    ui.painter().rect_stroke(
+        field.rect,
+        CornerRadius::same(5),
+        Stroke::new(1.5, palette.danger),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn field_hint(ui: &mut EguiUi, hint: &str, palette: Palette) {
+    ui.label("");
+    ui.scope(|ui| {
+        ui.set_max_width(290.0);
+        ui.add(egui::Label::new(RichText::new(hint).color(palette.danger)).wrap());
+    });
+    ui.end_row();
+}
+
+fn validated_field(
+    ui: &mut EguiUi,
+    label: &str,
+    value: &mut String,
+    validate: fn(&str) -> Option<&'static str>,
+    palette: Palette,
+) -> bool {
+    let input = field(ui, label, value);
+    if let Some(hint) = validate(value) {
+        mark_invalid(ui, &input, palette);
+        field_hint(ui, hint, palette);
+    }
+    input.changed()
+}
+
+fn field(ui: &mut EguiUi, label: &str, value: &mut String) -> egui::Response {
     let id = ui.label(label).id;
-    let changed = ui
+    let input = ui
         .add(
             egui::TextEdit::singleline(value)
-                .password(secret)
-                .desired_width(260.0),
+                .margin(Margin::symmetric(6, 4))
+                .desired_width(290.0),
         )
-        .labelled_by(id)
-        .changed();
+        .labelled_by(id);
     ui.end_row();
-    changed
+    input
 }
 
 fn choice(ui: &mut EguiUi, id: &str, current: &mut String, values: &[&str]) -> bool {
@@ -3067,6 +3401,88 @@ fn choice(ui: &mut EguiUi, id: &str, current: &mut String, values: &[&str]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_destination_validation_identifies_fields_that_need_attention() {
+        for server in [
+            "https://radio.example",
+            "http://[::1]:8000",
+            "HTTP://localhost:65535",
+        ] {
+            assert!(server_hint(server).is_none(), "{server}");
+        }
+        for server in [
+            "",
+            "radio.example:8000",
+            "ftp://radio.example",
+            "https:///live",
+            "http://:8000",
+            "http://radio.example:bad",
+            "http://localhost:",
+            "http://localhost:65536",
+            "http://localhost:0",
+        ] {
+            assert!(server_hint(server).is_some(), "{server}");
+        }
+        for mount in ["", "/", "live.opus", "/live?token", "/live#fragment"] {
+            assert!(mount_hint(mount).is_some(), "{mount}");
+        }
+        assert!(mount_hint("/möten/live.opus").is_none());
+    }
+
+    #[test]
+    fn source_settings_fit_narrow_window_with_long_names() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let name =
+            "Microphone Array (Intel® Smart Sound Technology for Digital Microphones) ".repeat(3);
+        let devices = vec![("mic".into(), name.clone(), 2)];
+        let mut source = Source {
+            device: "mic".into(),
+            device_name: name.clone(),
+            destination_ids: vec![1],
+            ..Default::default()
+        };
+        let mut destinations = vec![Destination {
+            id: 1,
+            name,
+            ..Default::default()
+        }];
+        source.recording.folder.clear();
+        let mut draft = Some(Destination {
+            server: String::new(),
+            mount: String::new(),
+            ..Default::default()
+        });
+        for width in [820.0, 560.0, 560.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 720.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let right = ui.max_rect().right();
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            source_settings(
+                                ui,
+                                &mut source,
+                                &mut destinations,
+                                &mut draft,
+                                &devices,
+                                Palette::for_theme(false),
+                            );
+                            assert!(
+                                ui.min_rect().right() <= right + 1.0,
+                                "settings extend to {} beyond {right}",
+                                ui.min_rect().right()
+                            );
+                        });
+                });
+            });
+        }
+    }
 
     #[test]
     fn strong_font_is_bound_on_first_frame() {
@@ -3219,6 +3635,45 @@ mod tests {
     }
 
     #[test]
+    fn compact_stereo_meter_uses_less_height_than_the_full_display() {
+        let ctx = Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(560.0, 480.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            let palette = Palette::for_theme(false);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let levels = [
+                    MeterLevel {
+                        signal: 0.5,
+                        held: 0.9,
+                        clipped: false,
+                    },
+                    MeterLevel {
+                        signal: 0.25,
+                        held: 1.0,
+                        clipped: true,
+                    },
+                ];
+                let compact = ui
+                    .scope(|ui| compact_meter(ui, &levels, palette))
+                    .response
+                    .rect;
+                let full = ui
+                    .scope(|ui| {
+                        meter(ui, "Vänster", levels[0], false, palette);
+                        meter(ui, "Höger", levels[1], true, palette);
+                    })
+                    .response
+                    .rect;
+                assert!(compact.height() <= full.height() * 0.5);
+                assert!(compact.right() <= ui.clip_rect().right());
+            });
+        });
+    }
+
+    #[test]
     fn meter_gradient_and_mesh_clip_cleanly_across_dbfs_range() {
         let palette = Palette::for_theme(true);
         let db_to_signal = |db: f32| 10.0_f32.powf(db / 20.0);
@@ -3322,8 +3777,8 @@ mod tests {
                     .show(ctx, |ui| {
                         card_frame(palette, palette.card_border).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            meter(ui, "Vänster", 0.5, false, palette);
-                            meter(ui, "Höger", 0.9, true, palette);
+                            meter(ui, "Vänster", MeterLevel { signal: 0.5, ..Default::default() }, false, palette);
+                            meter(ui, "Höger", MeterLevel { signal: 0.9, ..Default::default() }, true, palette);
                         });
                         widths = METER_SCALE_LABELS
                             .iter()
@@ -3379,43 +3834,22 @@ mod tests {
     }
 
     #[test]
-    fn saved_button_matches_save_button_width_and_is_non_interactive() {
-        let ctx = Context::default();
-        configure_fonts(&ctx);
-        ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
-        let mut normal_rect = Rect::NOTHING;
-        let mut saved_rect = Rect::NOTHING;
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
-                ..Default::default()
-            },
-            |ctx| {
-                let palette = Palette::for_theme(true);
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let save_label = "Spara inställningar";
-                    let normal = action_button(
-                        ui,
-                        Icon::Save,
-                        save_label,
-                        false,
-                        palette.text_disabled,
-                        ButtonVariant::Neutral,
-                        palette,
-                    );
-                    let min_w = button_width(ui, true, save_label, 13.5, 11.0);
-                    let saved = saved_button(ui, "Sparat", min_w, palette);
-                    normal_rect = normal.rect;
-                    saved_rect = saved.rect;
-                });
-            },
-        );
-        assert!(
-            (normal_rect.width() - saved_rect.width()).abs() < 0.5,
-            "saved button should keep save button width ({} vs {})",
-            normal_rect.width(),
-            saved_rect.width()
-        );
+    fn autosave_waits_for_the_last_edit_and_keeps_failed_changes_dirty() {
+        let start = Instant::now();
+        let mut state = SaveState::Idle;
+        assert!(!state.dirty());
+        state.changed(start);
+        let next_edit = start + Duration::from_millis(400);
+        state.changed(next_edit);
+        assert!(state.dirty());
+        assert!(!state.due(start + AUTOSAVE_DELAY));
+        assert!(state.due(next_edit + AUTOSAVE_DELAY));
+
+        state = SaveState::Failed("disk full".into());
+        assert!(state.dirty());
+        assert!(!state.due(next_edit + AUTOSAVE_DELAY));
+        state.changed(next_edit);
+        assert!(state.due(next_edit + AUTOSAVE_DELAY));
     }
 
     #[test]

@@ -30,14 +30,19 @@ impl SavedRecording {
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut close = false;
         egui::Modal::new(egui::Id::new("saved-recording")).show(ctx, |ui| {
-            ui.set_width(360.0);
+            ui.set_width(390.0);
             ui.heading("Inspelningen är sparad");
             ui.label(&self.source);
             ui.add_space(8.0);
             let label = ui.label("Filnamn").id;
             let extension = self.path.extension().unwrap_or_default().to_string_lossy();
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.name).labelled_by(label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.name)
+                        .margin(egui::Margin::symmetric(6, 4))
+                        .desired_width(305.0),
+                )
+                .labelled_by(label);
                 ui.label(format!(".{extension}"));
             });
             if let Some(folder) = self.path.parent() {

@@ -22,8 +22,37 @@ type Devices = Vec<(String, String, usize)>;
 struct Session {
     streams: Vec<(String, Output)>,
     recorder: Option<Output>,
-    peak: (f32, f32),
+    meters: [ChannelMeter; 2],
     present: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct MeterLevel {
+    pub signal: f32,
+    pub held: f32,
+    pub clipped: bool,
+}
+
+#[derive(Default)]
+struct ChannelMeter {
+    level: MeterLevel,
+    hold_remaining: Duration,
+}
+
+impl ChannelMeter {
+    fn update(&mut self, peak: f32) {
+        self.level.signal = peak.max(self.level.signal * 0.93);
+        self.level.clipped |= peak >= 1.0;
+        if peak >= self.level.held {
+            self.level.held = peak;
+            self.hold_remaining = Duration::from_millis(1500);
+        } else if self.hold_remaining.is_zero() {
+            // About 18 dB/s on the mixer's 10 ms clock.
+            self.level.held = (self.level.held * 0.98).max(self.level.signal);
+        } else {
+            self.hold_remaining = self.hold_remaining.saturating_sub(PERIOD);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -109,9 +138,25 @@ impl Engine {
     }
     pub fn update(&self, sources: &[Source]) {
         let mut mixer = self.mixer.lock().unwrap();
-        mixer
-            .sessions
-            .retain(|id, _| sources.iter().any(|s| s.id == *id));
+        let Mixer {
+            sessions,
+            sources: previous,
+            ..
+        } = &mut *mixer;
+        sessions.retain(|id, session| {
+            let Some(source) = sources.iter().find(|source| source.id == *id) else {
+                return false;
+            };
+            if let Some(old) = previous.iter().find(|old| old.id == *id) {
+                if old.device != source.device || old.left != source.left {
+                    session.meters[0] = ChannelMeter::default();
+                }
+                if old.device != source.device || old.right != source.right {
+                    session.meters[1] = ChannelMeter::default();
+                }
+            }
+            true
+        });
         mixer.sources = sources.to_vec();
     }
     pub fn streaming(&self, id: u64) -> bool {
@@ -138,13 +183,19 @@ impl Engine {
             .get(&id)
             .is_some_and(|s| s.present)
     }
-    pub fn level(&self, id: u64) -> (f32, f32) {
+    pub fn levels(&self, id: u64) -> [MeterLevel; 2] {
         self.mixer
             .lock()
             .unwrap()
             .sessions
             .get(&id)
-            .map_or((0., 0.), |s| s.peak)
+            .map(|s| [s.meters[0].level, s.meters[1].level])
+            .unwrap_or_default()
+    }
+    pub fn reset_clip(&self, id: u64, channel: usize) {
+        if let Some(session) = self.mixer.lock().unwrap().sessions.get_mut(&id) {
+            session.meters[channel].level.clipped = false;
+        }
     }
     pub fn live_status(&self, id: u64) -> LiveStatus {
         let mixer = self.mixer.lock().unwrap();
@@ -264,10 +315,8 @@ impl Mixer {
             let input = inputs.get(&source.device);
             let (pcm, peak, present) = route(source, input);
             session.present = present;
-            session.peak = (
-                peak.0.max(session.peak.0 * 0.93),
-                peak.1.max(session.peak.1 * 0.93),
-            );
+            session.meters[0].update(peak.0);
+            session.meters[1].update(peak.1);
             for output in session
                 .streams
                 .iter()
@@ -376,6 +425,44 @@ impl Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meter_holds_short_peak_and_latches_each_channel_until_reset() {
+        let mut mixer = Mixer::default();
+        let source = Source {
+            device: "mic".into(),
+            right: Some(1),
+            ..Source::default()
+        };
+        let id = source.id;
+        mixer.sources.push(source);
+        let mut samples = vec![0.0; FRAMES * 2];
+        samples[0] = -1.0;
+        samples[1] = 0.5;
+        mixer.render(&HashMap::from([(
+            "mic".into(),
+            Block {
+                channels: 2,
+                samples,
+            },
+        )]));
+        for _ in 0..150 {
+            mixer.render(&HashMap::new());
+        }
+        let levels = &mut mixer.sessions.get_mut(&id).unwrap().meters;
+        assert_eq!(levels[0].level.held, 1.0);
+        assert!(levels[0].level.signal < 0.01);
+        assert!(levels[0].level.clipped);
+        assert!(!levels[1].level.clipped);
+        levels[0].update(0.0);
+        assert!(levels[0].level.held < 1.0);
+        assert!(levels[0].level.clipped);
+        levels[0].level.clipped = false;
+        levels[0].update(0.1);
+        assert!(!levels[0].level.clipped);
+        levels[0].update(1.01);
+        assert!(levels[0].level.clipped);
+    }
 
     #[test]
     fn late_device_unplug_and_replug_preserve_timeline_and_channel_order() {

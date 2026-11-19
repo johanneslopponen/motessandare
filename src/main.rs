@@ -2,6 +2,7 @@
 
 mod capture;
 mod engine;
+mod guide;
 mod output;
 mod recording_dialog;
 mod settings;
@@ -17,7 +18,7 @@ fn app_icon() -> Option<eframe::egui::IconData> {
 fn main() -> eframe::Result {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([820.0, 720.0])
-        .with_min_inner_size([560.0, 480.0]);
+        .with_min_inner_size([550.0, 600.0]);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
