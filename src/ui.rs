@@ -171,6 +171,7 @@ enum Icon {
     Settings,
     Plus,
     Save,
+    Check,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -727,28 +728,35 @@ impl eframe::App for Ui {
                         ui.set_height(30.0);
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        let save_variant = if self.dirty {
-                            ButtonVariant::Primary
+                        let save_label = "Spara inställningar";
+                        let show_saved = !self.dirty && self.saved_feedback_remaining().is_some();
+                        if show_saved {
+                            let save_min_width = button_width(ui, true, save_label, 13.5, 11.0);
+                            saved_button(ui, "Sparat", save_min_width, palette);
                         } else {
-                            ButtonVariant::Neutral
-                        };
-                        let save_icon_color = if self.dirty {
-                            palette.tab_active_fg
-                        } else {
-                            palette.text_disabled
-                        };
-                        if action_button(
-                            ui,
-                            Icon::Save,
-                            "Spara inställningar",
-                            self.dirty,
-                            save_icon_color,
-                            save_variant,
-                            palette,
-                        )
-                        .clicked()
-                        {
-                            self.save();
+                            let save_variant = if self.dirty {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Neutral
+                            };
+                            let save_icon_color = if self.dirty {
+                                palette.tab_active_fg
+                            } else {
+                                palette.text_disabled
+                            };
+                            if action_button(
+                                ui,
+                                Icon::Save,
+                                save_label,
+                                self.dirty,
+                                save_icon_color,
+                                save_variant,
+                                palette,
+                            )
+                            .clicked()
+                            {
+                                self.save();
+                            }
                         }
 
                         if self.dirty {
@@ -756,12 +764,6 @@ impl eframe::App for Ui {
                                 RichText::new("Osparade ändringar")
                                     .size(12.5)
                                     .color(palette.warning),
-                            );
-                        } else if self.saved_feedback_remaining().is_some() {
-                            ui.label(
-                                RichText::new("Sparat ✓")
-                                    .size(12.5)
-                                    .color(palette.stream_accent),
                             );
                         }
 
@@ -828,26 +830,6 @@ impl eframe::App for Ui {
                             self.navigate(View::Overview);
                             return;
                         };
-                        let mut go_overview = false;
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            if compact_button(ui, "← Översikt", true, None, palette).clicked() {
-                                go_overview = true;
-                            }
-                            ui.label(
-                                RichText::new(format!(
-                                    " / {}",
-                                    display_name(&self.settings.sources[index])
-                                ))
-                                .size(13.5)
-                                .color(palette.text_secondary),
-                            );
-                        });
-                        if go_overview {
-                            self.navigate(View::Overview);
-                            return;
-                        }
-                        ui.add_space(6.0);
                         let source_id = self.settings.sources[index].id;
                         let streaming = self.engine.streaming(source_id);
                         let recording = self.engine.recording(source_id);
@@ -1430,6 +1412,15 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             painter.rect_filled(bottom, CornerRadius::same(1), color);
         }
+        Icon::Check => {
+            let stroke = Stroke::new(1.8, color);
+            let points = vec![
+                Pos2::new(c.x - r * 0.65, c.y + r * 0.05),
+                Pos2::new(c.x - r * 0.15, c.y + r * 0.55),
+                Pos2::new(c.x + r * 0.72, c.y - r * 0.48),
+            ];
+            painter.add(Shape::line(points, stroke));
+        }
     }
 }
 
@@ -1462,6 +1453,7 @@ enum ButtonVariant {
     StreamActive,
     RecordActive,
     Danger,
+    Saved,
 }
 
 fn paint_focus_ring(painter: &egui::Painter, rect: Rect, corner_radius: u8, palette: Palette) {
@@ -1598,6 +1590,9 @@ fn icon_button(
     response.on_hover_text(tooltip)
 }
 
+const BUTTON_ICON_SIZE: f32 = 15.0;
+const BUTTON_ICON_GAP: f32 = 7.0;
+
 struct ButtonSpec<'a> {
     icon: Option<(Icon, Color32)>,
     label: &'a str,
@@ -1607,21 +1602,37 @@ struct ButtonSpec<'a> {
     height: f32,
     font_size: f32,
     pad_x: f32,
+    min_width: Option<f32>,
+}
+
+fn button_width(ui: &EguiUi, has_icon: bool, label: &str, font_size: f32, pad_x: f32) -> f32 {
+    let font_id = FontId::proportional(font_size);
+    let text_galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font_id, Color32::PLACEHOLDER);
+    if has_icon {
+        pad_x + BUTTON_ICON_SIZE + BUTTON_ICON_GAP + text_galley.size().x + pad_x
+    } else {
+        pad_x + text_galley.size().x + pad_x
+    }
 }
 
 fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egui::Response {
-    let is_enabled = spec.enabled && ui.is_enabled();
+    let is_saved = matches!(spec.variant, ButtonVariant::Saved);
+    let is_enabled = spec.enabled && ui.is_enabled() && !is_saved;
     let font_id = FontId::proportional(spec.font_size);
     let text_galley = ui
         .painter()
         .layout_no_wrap(spec.label.to_owned(), font_id, Color32::PLACEHOLDER);
-    let icon_size = 15.0;
-    let gap = 7.0;
-    let width = if spec.icon.is_some() {
-        spec.pad_x + icon_size + gap + text_galley.size().x + spec.pad_x
+    let content_width = if spec.icon.is_some() {
+        BUTTON_ICON_SIZE + BUTTON_ICON_GAP + text_galley.size().x
     } else {
-        spec.pad_x + text_galley.size().x + spec.pad_x
+        text_galley.size().x
     };
+    let natural_width = content_width + spec.pad_x * 2.0;
+    let width = spec
+        .min_width
+        .map_or(natural_width, |min_w| natural_width.max(min_w));
 
     let sense = if is_enabled {
         Sense::click()
@@ -1634,7 +1645,14 @@ fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egu
     });
 
     let icon_color = spec.icon.map_or(palette.text_primary, |(_, color)| color);
-    let (bg, border, text_color, fg_icon) = if !is_enabled {
+    let (bg, border, text_color, fg_icon) = if is_saved {
+        (
+            palette.stream_pill_bg,
+            palette.stream_active_border,
+            palette.stream_accent,
+            palette.stream_accent,
+        )
+    } else if !is_enabled {
         (
             palette.btn_disabled_bg,
             palette.btn_disabled_border,
@@ -1692,6 +1710,7 @@ fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egu
                 };
                 (bg, palette.record_active_border, Color32::WHITE, Color32::WHITE)
             }
+            ButtonVariant::Saved => unreachable!(),
         }
     };
 
@@ -1707,25 +1726,44 @@ fn render_button(ui: &mut EguiUi, spec: ButtonSpec<'_>, palette: Palette) -> egu
         paint_focus_ring(painter, rect, 7, palette);
     }
 
+    let content_left = rect.center().x - content_width * 0.5;
     if let Some((icon, _)) = spec.icon {
-        let icon_center = Pos2::new(rect.left() + spec.pad_x + icon_size * 0.5, rect.center().y);
-        let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(icon_size));
+        let icon_center = Pos2::new(content_left + BUTTON_ICON_SIZE * 0.5, rect.center().y);
+        let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(BUTTON_ICON_SIZE));
         paint_icon(painter, icon_rect, icon, fg_icon);
 
         let text_pos = Pos2::new(
-            rect.left() + spec.pad_x + icon_size + gap,
+            content_left + BUTTON_ICON_SIZE + BUTTON_ICON_GAP,
             rect.center().y - text_galley.size().y * 0.5,
         );
         painter.galley(text_pos, text_galley, text_color);
     } else {
         let text_pos = Pos2::new(
-            rect.center().x - text_galley.size().x * 0.5,
+            content_left,
             rect.center().y - text_galley.size().y * 0.5,
         );
         painter.galley(text_pos, text_galley, text_color);
     }
 
     response
+}
+
+fn saved_button(ui: &mut EguiUi, label: &str, min_width: f32, palette: Palette) -> egui::Response {
+    render_button(
+        ui,
+        ButtonSpec {
+            icon: Some((Icon::Check, palette.stream_accent)),
+            label,
+            enabled: false,
+            variant: ButtonVariant::Saved,
+            text_color_override: None,
+            height: 30.0,
+            font_size: 13.5,
+            pad_x: 11.0,
+            min_width: Some(min_width),
+        },
+        palette,
+    )
 }
 
 fn action_button(
@@ -1748,6 +1786,7 @@ fn action_button(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
+            min_width: None,
         },
         palette,
     )
@@ -1771,6 +1810,7 @@ fn text_button(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
+            min_width: None,
         },
         palette,
     )
@@ -1794,6 +1834,7 @@ fn neutral_button_colored(
             height: 30.0,
             font_size: 13.5,
             pad_x: 11.0,
+            min_width: None,
         },
         palette,
     )
@@ -1817,6 +1858,7 @@ fn compact_button(
             height: 25.0,
             font_size: 12.5,
             pad_x: 9.0,
+            min_width: None,
         },
         palette,
     )
@@ -2093,10 +2135,11 @@ fn source_card(
         };
         ui.push_id(source.id, |ui| {
             if source.right.is_some() {
-                meter(ui, "Vänster", left, palette);
-                meter(ui, "Höger", right, palette);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                meter(ui, "Vänster", left, false, palette);
+                meter(ui, "Höger", right, true, palette);
             } else {
-                meter(ui, "Mono", left, palette);
+                meter(ui, "Mono", left, true, palette);
             }
         });
 
@@ -2174,93 +2217,296 @@ fn source_card(
     open_settings
 }
 
-const METER_TICKS_DB: &[f32] = &[-60.0, -40.0, -20.0, -12.0, -6.0, 0.0];
+const METER_MIN_DB: f32 = -60.0;
+const METER_MAX_DB: f32 = 0.0;
+const METER_TICKS_DB: &[f32] = &[
+    -60.0, -54.0, -48.0, -42.0, -36.0, -30.0, -24.0, -18.0, -12.0, -6.0, -3.0, 0.0,
+];
+// Numeric scale labels in placement priority order so endpoints and key dB landmarks
+// stay visible while colliding labels drop cleanly on narrow widths.
+const METER_SCALE_LABELS: &[(f32, &str)] = &[
+    (0.0, "0"),
+    (-60.0, "-60"),
+    (-6.0, "-6"),
+    (-12.0, "-12"),
+    (-24.0, "-24"),
+    (-36.0, "-36"),
+    (-48.0, "-48"),
+    (-18.0, "-18"),
+    (-3.0, "-3"),
+];
 
-fn meter_fraction(signal: f32) -> f32 {
-    if signal.is_finite() && signal > 0.0 {
-        (1.0 + signal.log10() / 3.0).clamp(0.0, 1.0)
+fn db_to_meter_fraction(db: f32) -> f32 {
+    if db.is_finite() {
+        ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0)
     } else {
         0.0
     }
 }
 
-fn meter_color(signal: f32, palette: Palette) -> Color32 {
-    let db = if signal.is_finite() && signal > 0.0 {
-        20.0 * signal.log10()
+fn meter_fraction(signal: f32) -> f32 {
+    if signal.is_finite() && signal > 0.0 {
+        db_to_meter_fraction(20.0 * signal.log10())
     } else {
-        f32::NEG_INFINITY
-    };
-    if db > -3.0 {
-        palette.meter_peak
-    } else if db >= -18.0 {
-        palette.meter_warn
-    } else {
-        palette.meter_ok
+        0.0
     }
 }
 
-fn meter(ui: &mut EguiUi, label: &str, signal: f32, palette: Palette) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [54.0, 18.0],
-            egui::Label::new(
-                RichText::new(label)
-                    .size(12.5)
-                    .color(palette.text_secondary),
-            ),
-        );
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |c0: u8, c1: u8| -> u8 {
+        (f32::from(c0) + (f32::from(c1) - f32::from(c0)) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color32::from_rgba_premultiplied(
+        lerp(a.r(), b.r()),
+        lerp(a.g(), b.g()),
+        lerp(a.b(), b.b()),
+        lerp(a.a(), b.a()),
+    )
+}
 
-        let bar_width = (ui.available_width() - 82.0).max(40.0);
-        let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(bar_width, 10.0), Sense::hover());
-        let painter = ui.painter();
-        let rounding = CornerRadius::same(5);
-        painter.rect_filled(bar_rect, rounding, palette.meter_track);
-        painter.rect_stroke(
-            bar_rect,
-            rounding,
-            Stroke::new(1.0, palette.meter_border),
-            egui::StrokeKind::Inside,
-        );
+fn meter_gradient_stops(palette: Palette) -> [(f32, Color32); 6] {
+    [
+        (db_to_meter_fraction(-60.0), palette.meter_ok),
+        (db_to_meter_fraction(-24.0), palette.meter_ok),
+        (db_to_meter_fraction(-18.0), palette.meter_warn),
+        (db_to_meter_fraction(-6.0), palette.meter_warn),
+        (db_to_meter_fraction(-3.0), palette.meter_peak),
+        (db_to_meter_fraction(0.0), palette.meter_peak),
+    ]
+}
 
-        let frac = meter_fraction(signal);
-        if frac > 0.002 {
-            let fill_w = (bar_rect.width() * frac).max(6.0).min(bar_rect.width());
-            let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(fill_w, bar_rect.height()));
-            painter.rect_filled(fill_rect, rounding, meter_color(signal, palette));
+fn meter_gradient_color(frac: f32, palette: Palette) -> Color32 {
+    let frac = frac.clamp(0.0, 1.0);
+    let stops = meter_gradient_stops(palette);
+    for pair in stops.windows(2) {
+        let (f0, c0) = pair[0];
+        let (f1, c1) = pair[1];
+        if frac <= f1 {
+            let span = f1 - f0;
+            let t = if span > 0.0 { (frac - f0) / span } else { 0.0 };
+            return lerp_color(c0, c1, t);
         }
+    }
+    stops[stops.len() - 1].1
+}
 
-        for &tick_db in METER_TICKS_DB {
-            let tick_signal = 10.0_f32.powf(tick_db / 20.0);
-            let tick_frac = meter_fraction(tick_signal);
-            let x = (bar_rect.left() + bar_rect.width() * tick_frac)
-                .clamp(bar_rect.left() + 1.5, bar_rect.right() - 1.5);
-            let tick_color = if frac > 0.002 && tick_frac <= frac {
-                palette.meter_track.gamma_multiply(0.65)
-            } else {
-                palette.text_disabled.gamma_multiply(0.55)
-            };
-            painter.line_segment(
-                [
-                    Pos2::new(x, bar_rect.top() + 1.5),
-                    Pos2::new(x, bar_rect.bottom() - 1.5),
-                ],
-                Stroke::new(1.0, tick_color),
-            );
+fn build_meter_gradient_mesh(rect: Rect, fill_frac: f32, palette: Palette) -> egui::epaint::Mesh {
+    let mut mesh = egui::epaint::Mesh::default();
+    let fill_frac = fill_frac.clamp(0.0, 1.0);
+    if fill_frac <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return mesh;
+    }
+
+    let stops = meter_gradient_stops(palette);
+    for pair in stops.windows(2) {
+        let (f0, c0) = pair[0];
+        let (f1, _) = pair[1];
+        if f0 >= fill_frac {
+            break;
         }
+        let end_frac = f1.min(fill_frac);
+        if end_frac <= f0 {
+            continue;
+        }
+        let c1 = meter_gradient_color(end_frac, palette);
+        let x0 = rect.left() + rect.width() * f0;
+        let x1 = rect.left() + rect.width() * end_frac;
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend_from_slice(&[
+            egui::epaint::Vertex {
+                pos: Pos2::new(x0, rect.top()),
+                uv: egui::epaint::WHITE_UV,
+                color: c0,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x1, rect.top()),
+                uv: egui::epaint::WHITE_UV,
+                color: c1,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x1, rect.bottom()),
+                uv: egui::epaint::WHITE_UV,
+                color: c1,
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(x0, rect.bottom()),
+                uv: egui::epaint::WHITE_UV,
+                color: c0,
+            },
+        ]);
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 
-        let text = if signal.is_finite() && signal >= 0.001 {
-            format!("{:.1} dBFS", 20.0 * signal.log10())
+    mesh
+}
+
+struct PlacedScaleLabel {
+    index: usize,
+    tick_x: f32,
+    label_x: f32,
+    width: f32,
+}
+
+fn layout_meter_scale_labels(
+    bar_left: f32,
+    bar_width: f32,
+    candidates: &[(f32, f32)],
+    min_gap: f32,
+) -> Vec<PlacedScaleLabel> {
+    if bar_width <= 0.0 {
+        return Vec::new();
+    }
+    let bar_right = bar_left + bar_width;
+    let mut placed: Vec<PlacedScaleLabel> = Vec::with_capacity(candidates.len());
+
+    for (index, &(db, width)) in candidates.iter().enumerate() {
+        let frac = db_to_meter_fraction(db);
+        let tick_x = bar_left + bar_width * frac;
+        let max_left = (bar_right - width).max(bar_left);
+        let label_x = if frac <= 0.001 {
+            bar_left
+        } else if frac >= 0.999 {
+            max_left
         } else {
-            "−∞ dBFS".to_owned()
+            (tick_x - width * 0.5).clamp(bar_left, max_left)
         };
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(text)
-                    .monospace()
-                    .size(12.0)
-                    .color(palette.text_secondary),
-            );
+        let label_right = label_x + width;
+        let overlaps = placed.iter().any(|other| {
+            label_x < other.label_x + other.width + min_gap
+                && other.label_x < label_right + min_gap
         });
+        if !overlaps {
+            placed.push(PlacedScaleLabel {
+                index,
+                tick_x,
+                label_x,
+                width,
+            });
+        }
+    }
+
+    placed.sort_by(|a, b| a.label_x.total_cmp(&b.label_x));
+    placed
+}
+
+fn paint_meter_scale(painter: &egui::Painter, bar_rect: Rect, scale_top: f32, palette: Palette) {
+    let font_id = FontId::proportional(9.5);
+    let galleys: Vec<Arc<egui::Galley>> = METER_SCALE_LABELS
+        .iter()
+        .map(|&(_, text)| painter.layout_no_wrap(text.to_owned(), font_id.clone(), Color32::PLACEHOLDER))
+        .collect();
+    let candidates: Vec<(f32, f32)> = METER_SCALE_LABELS
+        .iter()
+        .zip(&galleys)
+        .map(|(&(db, _), galley)| (db, galley.size().x))
+        .collect();
+
+    let placed = layout_meter_scale_labels(bar_rect.left(), bar_rect.width(), &candidates, 4.0);
+    for item in placed {
+        let tick_x = item.tick_x.clamp(bar_rect.left() + 0.5, bar_rect.right() - 0.5);
+        painter.line_segment(
+            [
+                Pos2::new(tick_x, bar_rect.bottom()),
+                Pos2::new(tick_x, bar_rect.bottom() + 2.5),
+            ],
+            Stroke::new(1.0, palette.meter_border),
+        );
+        painter.galley(
+            Pos2::new(item.label_x, scale_top),
+            Arc::clone(&galleys[item.index]),
+            palette.text_secondary,
+        );
+    }
+}
+
+fn meter(ui: &mut EguiUi, label: &str, signal: f32, show_scale: bool, palette: Palette) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().interact_size.y = 18.0;
+        let mut bar_rect = Rect::NOTHING;
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [54.0, 18.0],
+                egui::Label::new(
+                    RichText::new(label)
+                        .size(12.5)
+                        .color(palette.text_secondary),
+                ),
+            );
+
+            let bar_width = (ui.available_width() - 82.0).max(40.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_width, 12.0), Sense::hover());
+            bar_rect = rect;
+            let painter = ui.painter();
+            let rounding = CornerRadius::same(3);
+            painter.rect_filled(bar_rect, rounding, palette.meter_track);
+
+            let fill_rect = bar_rect.shrink(1.0);
+            let frac = meter_fraction(signal);
+            if frac > 0.002 && fill_rect.width() > 0.0 {
+                let effective_frac = frac.max(2.0 / fill_rect.width()).min(1.0);
+                let mesh = build_meter_gradient_mesh(fill_rect, effective_frac, palette);
+                painter.add(Shape::mesh(mesh));
+            }
+
+            for &tick_db in METER_TICKS_DB {
+                if tick_db <= METER_MIN_DB || tick_db >= METER_MAX_DB {
+                    continue;
+                }
+                let tick_frac = db_to_meter_fraction(tick_db);
+                let x = fill_rect.left() + fill_rect.width() * tick_frac;
+                let major = METER_SCALE_LABELS
+                    .iter()
+                    .any(|&(label_db, _)| (label_db - tick_db).abs() < 0.01);
+                let covered = frac > 0.002 && tick_frac <= frac;
+                let tick_color = match (major, covered) {
+                    (true, true) => palette.meter_track.gamma_multiply(0.6),
+                    (true, false) => palette.text_disabled.gamma_multiply(0.5),
+                    (false, true) => palette.meter_track.gamma_multiply(0.4),
+                    (false, false) => palette.text_disabled.gamma_multiply(0.32),
+                };
+                let top_y = if major {
+                    fill_rect.top() + 0.5
+                } else {
+                    fill_rect.center().y
+                };
+                painter.line_segment(
+                    [Pos2::new(x, top_y), Pos2::new(x, fill_rect.bottom() - 0.5)],
+                    Stroke::new(1.0, tick_color),
+                );
+            }
+
+            painter.rect_stroke(
+                bar_rect,
+                rounding,
+                Stroke::new(1.0, palette.meter_border),
+                egui::StrokeKind::Inside,
+            );
+
+            let text = if signal.is_finite() && signal >= 0.001 {
+                format!("{:.1} dBFS", 20.0 * signal.log10())
+            } else {
+                "−∞ dBFS".to_owned()
+            };
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(text)
+                        .monospace()
+                        .size(12.0)
+                        .color(palette.text_secondary),
+                );
+            });
+        });
+
+        if show_scale {
+            let (scale_rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 13.0), Sense::hover());
+            paint_meter_scale(ui.painter(), bar_rect, scale_rect.top(), palette);
+        }
     });
 }
 
@@ -2929,26 +3175,52 @@ mod tests {
     }
 
     #[test]
-    fn meter_color_follows_dbfs_thresholds_and_ticks_map_cleanly() {
+    fn meter_gradient_and_mesh_clip_cleanly_across_dbfs_range() {
         let palette = Palette::for_theme(true);
         let db_to_signal = |db: f32| 10.0_f32.powf(db / 20.0);
 
-        assert_eq!(meter_color(0.0, palette), palette.meter_ok);
-        assert_eq!(meter_color(f32::NAN, palette), palette.meter_ok);
-        assert_eq!(meter_color(db_to_signal(-24.0), palette), palette.meter_ok);
-        assert_eq!(meter_color(db_to_signal(-18.5), palette), palette.meter_ok);
-        assert_eq!(meter_color(db_to_signal(-18.0), palette), palette.meter_warn);
-        assert_eq!(meter_color(db_to_signal(-6.0), palette), palette.meter_warn);
-        assert_eq!(meter_color(db_to_signal(-3.0), palette), palette.meter_warn);
-        assert_eq!(meter_color(db_to_signal(-2.5), palette), palette.meter_peak);
-        assert_eq!(meter_color(db_to_signal(0.0), palette), palette.meter_peak);
+        assert_eq!(meter_fraction(0.0), 0.0);
+        assert_eq!(meter_fraction(f32::NAN), 0.0);
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(-60.0), palette),
+            palette.meter_ok
+        );
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(-24.0), palette),
+            palette.meter_ok
+        );
+        let mid_ok_warn = meter_gradient_color(db_to_meter_fraction(-21.0), palette);
+        assert_ne!(mid_ok_warn, palette.meter_ok);
+        assert_ne!(mid_ok_warn, palette.meter_warn);
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(-18.0), palette),
+            palette.meter_warn
+        );
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(-6.0), palette),
+            palette.meter_warn
+        );
+        let mid_warn_peak = meter_gradient_color(db_to_meter_fraction(-4.5), palette);
+        assert_ne!(mid_warn_peak, palette.meter_warn);
+        assert_ne!(mid_warn_peak, palette.meter_peak);
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(-3.0), palette),
+            palette.meter_peak
+        );
+        assert_eq!(
+            meter_gradient_color(db_to_meter_fraction(0.0), palette),
+            palette.meter_peak
+        );
 
         let expected = [
             (-60.0, 0.0),
-            (-40.0, 1.0 / 3.0),
-            (-20.0, 2.0 / 3.0),
+            (-48.0, 0.2),
+            (-36.0, 0.4),
+            (-24.0, 0.6),
+            (-18.0, 0.7),
             (-12.0, 0.8),
             (-6.0, 0.9),
+            (-3.0, 0.95),
             (0.0, 1.0),
         ];
         for (db, frac) in expected {
@@ -2957,6 +3229,189 @@ mod tests {
                 (actual - frac).abs() < 1e-4,
                 "tick {db} dB expected fraction {frac}, got {actual}"
             );
+        }
+
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(300.0, 10.0));
+        assert!(build_meter_gradient_mesh(rect, 0.0, palette).vertices.is_empty());
+
+        let quiet_mesh = build_meter_gradient_mesh(rect, 0.5, palette);
+        assert_eq!(quiet_mesh.vertices.len(), 4);
+        assert!(quiet_mesh.vertices.iter().all(|v| v.color == palette.meter_ok));
+
+        let mid_frac = db_to_meter_fraction(-12.0);
+        let mid_mesh = build_meter_gradient_mesh(rect, mid_frac, palette);
+        assert_eq!(mid_mesh.vertices.len(), 12);
+        let max_x = mid_mesh
+            .vertices
+            .iter()
+            .map(|v| v.pos.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_x - (rect.left() + rect.width() * mid_frac)).abs() < 1e-3);
+        assert_eq!(mid_mesh.vertices.first().unwrap().color, palette.meter_ok);
+        assert_eq!(mid_mesh.vertices[mid_mesh.vertices.len() - 2].color, palette.meter_warn);
+
+        let full_mesh = build_meter_gradient_mesh(rect, 1.0, palette);
+        assert_eq!(full_mesh.vertices.len(), 20);
+        assert_eq!(full_mesh.vertices.first().unwrap().color, palette.meter_ok);
+        assert_eq!(full_mesh.vertices[full_mesh.vertices.len() - 2].color, palette.meter_peak);
+    }
+
+    #[test]
+    fn meter_scale_labels_never_overlap_at_min_or_narrow_widths() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        ctx.style_mut(|style| {
+            style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+            style.spacing.interact_size.y = 28.0;
+        });
+        let font_id = FontId::proportional(9.5);
+        let mut widths = Vec::new();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(560.0, 480.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let palette = Palette::for_theme(true);
+                egui::CentralPanel::default()
+                    .frame(Frame::new().inner_margin(Margin::symmetric(16, 12)))
+                    .show(ctx, |ui| {
+                        card_frame(palette, palette.card_border).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            meter(ui, "Vänster", 0.5, false, palette);
+                            meter(ui, "Höger", 0.9, true, palette);
+                        });
+                        widths = METER_SCALE_LABELS
+                            .iter()
+                            .map(|&(db, text)| {
+                                let w = ui
+                                    .painter()
+                                    .layout_no_wrap(
+                                        text.to_owned(),
+                                        font_id.clone(),
+                                        Color32::PLACEHOLDER,
+                                    )
+                                    .size()
+                                    .x;
+                                (db, w)
+                            })
+                            .collect();
+                    });
+            },
+        );
+        assert!(
+            output.shapes.len() > 10,
+            "expected meter gradient, ticks, and scale shapes"
+        );
+
+        for bar_width in [100.0_f32, 160.0, 220.0, 320.0, 560.0] {
+            let bar_left = 20.0;
+            let min_gap = 4.0;
+            let placed = layout_meter_scale_labels(bar_left, bar_width, &widths, min_gap);
+            assert!(
+                placed.len() >= 2,
+                "expected at least endpoint labels at width {bar_width}"
+            );
+            for item in &placed {
+                assert!(
+                    item.label_x >= bar_left - 0.01
+                        && item.label_x + item.width <= bar_left + bar_width + 0.01,
+                    "label out of bounds at width {bar_width}: {}-{}",
+                    item.label_x,
+                    item.label_x + item.width
+                );
+            }
+            for pair in placed.windows(2) {
+                assert!(
+                    pair[0].label_x + pair[0].width + min_gap <= pair[1].label_x + 0.01,
+                    "labels overlap at width {bar_width}: {}..{} vs {}..{}",
+                    pair[0].label_x,
+                    pair[0].label_x + pair[0].width,
+                    pair[1].label_x,
+                    pair[1].label_x + pair[1].width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saved_button_matches_save_button_width_and_is_non_interactive() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
+        let mut normal_rect = Rect::NOTHING;
+        let mut saved_rect = Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let palette = Palette::for_theme(true);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let save_label = "Spara inställningar";
+                    let normal = action_button(
+                        ui,
+                        Icon::Save,
+                        save_label,
+                        false,
+                        palette.text_disabled,
+                        ButtonVariant::Neutral,
+                        palette,
+                    );
+                    let min_w = button_width(ui, true, save_label, 13.5, 11.0);
+                    let saved = saved_button(ui, "Sparat", min_w, palette);
+                    normal_rect = normal.rect;
+                    saved_rect = saved.rect;
+                });
+            },
+        );
+        assert!(
+            (normal_rect.width() - saved_rect.width()).abs() < 0.5,
+            "saved button should keep save button width ({} vs {})",
+            normal_rect.width(),
+            saved_rect.width()
+        );
+    }
+
+    #[test]
+    fn ui_non_ascii_glyphs_exist_in_configured_fonts() {
+        for use_system_fonts in [false, true] {
+            let ctx = Context::default();
+            if use_system_fonts {
+                configure_fonts(&ctx);
+            }
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.fonts(|fonts| {
+                    let prop = FontId::proportional(13.5);
+                    let mono = FontId::monospace(12.0);
+                    let mut lock = fonts.lock();
+                    for ch in ['Ö', 'ä', 'å', 'ö', '·', '–', '…'] {
+                        assert!(
+                            lock.fonts.font(&prop).has_glyph(ch),
+                            "missing proportional glyph U+{:04X} ({ch:?}) (system_fonts={use_system_fonts})",
+                            ch as u32
+                        );
+                    }
+                    if use_system_fonts {
+                        let strong = FontId::new(15.5, FontFamily::Name(STRONG_FONT.into()));
+                        for ch in ['Ö', 'ä', 'å', 'ö'] {
+                            assert!(
+                                lock.fonts.font(&strong).has_glyph(ch),
+                                "missing strong glyph U+{:04X} ({ch:?})",
+                                ch as u32
+                            );
+                        }
+                    }
+                    for ch in ['−', '∞'] {
+                        assert!(
+                            lock.fonts.font(&mono).has_glyph(ch),
+                            "missing monospace glyph U+{:04X} ({ch:?}) (system_fonts={use_system_fonts})",
+                            ch as u32
+                        );
+                    }
+                });
+            });
         }
     }
 
