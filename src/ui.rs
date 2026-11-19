@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const STRONG_FONT: &str = "strong";
+const SOURCE_SIDEBAR_THRESHOLD: f32 = 800.0;
 const SAVED_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 const SAVE_SHORTCUT: egui::KeyboardShortcut =
@@ -287,6 +288,11 @@ impl Ui {
         self.new_destination_draft = None;
     }
 
+    fn open_source_settings(&mut self, id: u64) {
+        self.selected_source = Some(id);
+        self.navigate(View::SourceSettings);
+    }
+
     fn add_source(&mut self) {
         if self.load_blocked {
             return;
@@ -298,8 +304,7 @@ impl Ui {
             destination_ids: Vec::new(),
             ..Source::default()
         });
-        self.selected_source = Some(id);
-        self.navigate(View::SourceSettings);
+        self.open_source_settings(id);
         self.save_state.changed(Instant::now());
         self.engine.update(&self.settings.sources);
     }
@@ -322,6 +327,58 @@ impl Ui {
         self.settings.sources.iter().any(|source| {
             source.destination_ids.contains(&destination_id) && self.engine.streaming(source.id)
         })
+    }
+
+    fn source_sidebar(&mut self, ctx: &Context, palette: Palette) {
+        if self.load_blocked
+            || self.settings.sources.is_empty()
+            || ctx.screen_rect().width() <= SOURCE_SIDEBAR_THRESHOLD
+        {
+            return;
+        }
+
+        let mut open_settings_id = None;
+        egui::SidePanel::right("source_sidebar")
+            .resizable(false)
+            .exact_width(184.0)
+            .frame(
+                Frame::new()
+                    .fill(palette.header_bg)
+                    .inner_margin(Margin::same(12)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(strong_text("Ljudkällor", 14.0, palette.text_primary));
+                    crate::guide::tip(
+                        ui,
+                        "Välj en ljudkälla för att öppna dess inställningar. Du kan byta källa direkt här.",
+                    );
+                });
+                ScrollArea::vertical().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for source in &self.settings.sources {
+                        let name = display_name(source);
+                        let selected = self.view == View::SourceSettings
+                            && self.selected_source == Some(source.id);
+                        let button = egui::Button::new(name)
+                            .selected(selected)
+                            .corner_radius(7)
+                            .min_size(Vec2::new(ui.available_width(), 28.0))
+                            .truncate();
+                        if ui
+                            .push_id(source.id, |ui| ui.add(button))
+                            .inner
+                            .clicked()
+                            && !selected
+                        {
+                            open_settings_id = Some(source.id);
+                        }
+                    }
+                });
+            });
+        if let Some(id) = open_settings_id {
+            self.open_source_settings(id);
+        }
     }
 
     fn save(&mut self) {
@@ -689,9 +746,6 @@ impl Ui {
             });
         });
 
-        if crate::guide::enabled(ui.ctx()) {
-            ui.small("Peka eller klicka på ett ? för att få hjälp.");
-        }
         if let Some(message) = self.notice.clone() {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
@@ -763,11 +817,13 @@ impl eframe::App for Ui {
                 self.header(ui, palette);
             });
 
+        self.source_sidebar(ctx, palette);
+
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
                     .fill(palette.canvas_bg)
-                    .inner_margin(Margin::symmetric(16, 12)),
+                    .inner_margin(Margin::symmetric(14, 12)),
             )
             .show(ctx, |ui| {
                 if self.load_blocked {
@@ -799,23 +855,50 @@ impl eframe::App for Ui {
                         self.navigate(View::Destinations);
                     }
 
+                    let show_compact =
+                        self.view == View::Overview && !self.settings.sources.is_empty();
+                    if show_compact {
+                        let mut compact = self
+                            .settings
+                            .compact_overview
+                            .unwrap_or(self.settings.sources.len() >= 4);
+                        if ui.checkbox(&mut compact, "Kompakt").changed() {
+                            self.settings.compact_overview = Some(compact);
+                            self.save_state.changed(Instant::now());
+                        }
+                    }
+
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.set_height(30.0);
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        if matches!(self.view, View::Overview | View::SourceSettings)
-                            && action_button(
-                                ui,
-                                Icon::Plus,
-                                "Lägg till ljudkälla",
-                                true,
-                                palette.text_primary,
-                                ButtonVariant::Neutral,
-                                palette,
-                            )
-                            .clicked()
-                        {
-                            self.add_source();
+                        if matches!(self.view, View::Overview | View::SourceSettings) {
+                            let label = "Lägg till ljudkälla";
+                            // Leave room for save feedback without moving the add button.
+                            let add_source = if show_compact && ui.available_width() < 235.0 {
+                                icon_button(
+                                    ui,
+                                    Icon::Plus,
+                                    true,
+                                    palette.text_primary,
+                                    false,
+                                    palette,
+                                    label,
+                                )
+                            } else {
+                                action_button(
+                                    ui,
+                                    Icon::Plus,
+                                    label,
+                                    true,
+                                    palette.text_primary,
+                                    ButtonVariant::Neutral,
+                                    palette,
+                                )
+                            };
+                            if add_source.clicked() {
+                                self.add_source();
+                            }
                         }
 
                         match self.save_state {
@@ -847,14 +930,14 @@ impl eframe::App for Ui {
                             return;
                         }
                         let mut open_settings_id = None;
-                        let mut compact = self.settings.compact_overview.unwrap_or(self.settings.sources.len() >= 4);
-                        if ui.checkbox(&mut compact, "Kompakt översikt").changed() {
-                            self.settings.compact_overview = Some(compact);
-                            self.save_state.changed(Instant::now());
-                        }
+                        let compact = self
+                            .settings
+                            .compact_overview
+                            .unwrap_or(self.settings.sources.len() >= 4);
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 14.0;
                                 for source in &self.settings.sources {
                                     ui.push_id(source.id, |ui| {
                                         let clicked_settings = source_card(
@@ -871,13 +954,11 @@ impl eframe::App for Ui {
                                         if clicked_settings {
                                             open_settings_id = Some(source.id);
                                         }
-                                        ui.add_space(10.0);
                                     });
                                 }
                             });
                         if let Some(id) = open_settings_id {
-                            self.selected_source = Some(id);
-                            self.navigate(View::SourceSettings);
+                            self.open_source_settings(id);
                         }
                     }
                     View::SourceSettings => {
@@ -904,6 +985,7 @@ impl eframe::App for Ui {
                         } = &mut self.settings;
                         let source = &mut sources[index];
                         ScrollArea::vertical()
+                            .id_salt(("source_settings", source_id))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 source_card(
@@ -2226,15 +2308,15 @@ fn source_card(
         palette.card_border
     };
 
-    let mut frame = card_frame(palette, border_color);
-    if compact {
-        frame = frame.inner_margin(Margin::symmetric(10, 6));
-    }
+    let margin = if compact {
+        Margin::symmetric(10, 6)
+    } else {
+        Margin::symmetric(14, 9)
+    };
+    let frame = card_frame(palette, border_color).inner_margin(margin);
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        if compact {
-            ui.spacing_mut().item_spacing.y = 3.0;
-        }
+        ui.spacing_mut().item_spacing.y = if compact { 3.0 } else { 5.0 };
 
         // Card header: title + active badges on left, settings button on right
         ui.horizontal_wrapped(|ui| {
@@ -2314,12 +2396,10 @@ fn source_card(
         });
 
         if !compact {
-            ui.add_space(4.0);
             let (sep_rect, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter()
                 .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
-            ui.add_space(6.0);
         }
 
         let present = engine.present(source.id);
@@ -2395,7 +2475,6 @@ fn source_card(
         });
 
         if !compact {
-            ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 source_output_controls(
                     ui,
