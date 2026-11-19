@@ -225,7 +225,6 @@ pub struct Ui {
     remove_destination: Option<u64>,
     new_destination_draft: Option<Destination>,
     confirm_stop: Option<StopConfirm>,
-    help_open: bool,
     app_icon: Option<TextureHandle>,
     close_blocked: bool,
     load_blocked: bool,
@@ -270,7 +269,6 @@ impl Ui {
             remove_destination: None,
             new_destination_draft: None,
             confirm_stop: None,
-            help_open: false,
             app_icon,
             close_blocked: false,
             load_blocked,
@@ -535,12 +533,14 @@ impl Ui {
                 );
             }
             ui.label(strong_text("Mötessändare", 18.0, palette.text_primary));
+            let help = crate::guide::enabled(ui.ctx());
             if icon_button(
-                ui, Icon::Help, true, palette.text_secondary, false, palette, "Visa användarguiden",
+                ui, Icon::Help, true, palette.text_secondary, help, palette,
+                if help { "Stäng hjälptipsen" } else { "Visa hjälptips vid knappar och fält" },
             )
             .clicked()
             {
-                self.help_open = true;
+                crate::guide::set_enabled(ui.ctx(), !help);
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -658,6 +658,9 @@ impl Ui {
             });
         });
 
+        if crate::guide::enabled(ui.ctx()) {
+            ui.small("Peka eller klicka på ett ? för att få hjälp.");
+        }
         if let Some(message) = self.notice.clone() {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
@@ -973,10 +976,11 @@ impl eframe::App for Ui {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(
-                                        "Spara sändningsdestinationer globalt så kan de väljas av en eller flera ljudkällor.",
+                                        "Välj vart ljudet ska skickas när du sänder.",
                                     )
                                     .color(palette.text_secondary),
                                 );
+                                crate::guide::tip(ui, "Be den som sköter sändningen om adress och lösenord.");
                                 ui.add_space(10.0);
                                 if action_button(
                                     ui,
@@ -1006,6 +1010,7 @@ impl eframe::App for Ui {
                                         16.5,
                                         palette.text_primary,
                                     ));
+                                    crate::guide::tip(ui, "Här sparar du vart ljudet ska skickas. Be den som sköter sändningen om adress och lösenord.");
                                     ui.with_layout(
                                         Layout::right_to_left(Align::Center),
                                         |ui| {
@@ -1158,15 +1163,11 @@ impl eframe::App for Ui {
             }
         }
         if self.confirm_stop.is_some() {
-            self.help_open = false;
             self.stop_confirm_modal(ctx, palette);
         } else if let Some(recording) = self.saved_recordings.front_mut() {
-            self.help_open = false;
             if recording.show(ctx) {
                 self.saved_recordings.pop_front();
             }
-        } else if self.help_open && crate::guide::show(ctx) {
-            self.help_open = false;
         }
 
         let closing = ctx.input(|input| input.viewport().close_requested());
@@ -1977,9 +1978,10 @@ fn empty_sources_view(ui: &mut EguiUi, palette: Palette, on_add: impl FnOnce()) 
         ));
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Välj en ljudingång och kanaler för sändning eller inspelning.")
+            RichText::new("Börja med att välja vilken mikrofon du vill använda.")
                 .color(palette.text_secondary),
         );
+        crate::guide::tip(ui, "Klicka på Lägg till ljudkälla. Välj sedan din mikrofon i listan.");
         ui.add_space(10.0);
         if action_button(
             ui,
@@ -2103,6 +2105,7 @@ fn source_card(
                 16.5,
                 palette.text_primary,
             ));
+            crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
             if streaming {
                 status_pill(
                     ui,
@@ -2315,7 +2318,7 @@ fn source_output_controls(
                 palette.stream_accent,
                 stream_variant,
                 palette,
-            )
+            ).on_hover_text("De som lyssnar kan höra ljudet medan du sänder.")
         },
         stream_enabled,
         stream_reason,
@@ -2357,7 +2360,7 @@ fn source_output_controls(
                 palette.record_accent,
                 record_variant,
                 palette,
-            )
+            ).on_hover_text("Ljudet sparas i en fil på din dator.")
         },
         record_enabled,
         record_reason,
@@ -2745,7 +2748,10 @@ fn source_settings(
     // Section 1: Ljudingång
     card_frame(palette, palette.card_border).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(strong_text("Ljudingång", 15.5, palette.text_primary));
+        ui.horizontal(|ui| {
+            ui.label(strong_text("Ljudingång", 15.5, palette.text_primary));
+            crate::guide::tip(ui, "Välj din mikrofon och prata en stund. Stapeln rör sig när ljudet kommer in.");
+        });
         ui.add_space(4.0);
         egui::Grid::new("input-fields")
             .num_columns(2)
@@ -2856,11 +2862,10 @@ fn source_settings(
     // Section 2: Sändningsdestinationer
     card_frame(palette, palette.card_border).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(strong_text(
-            "Sändningsdestinationer",
-            15.5,
-            palette.text_primary,
-        ));
+        ui.horizontal(|ui| {
+            ui.label(strong_text("Sändningsdestinationer", 15.5, palette.text_primary));
+            crate::guide::tip(ui, "Välj vart ljudet ska sändas. Du kan hoppa över det här om du bara vill spela in.");
+        });
         ui.add_space(4.0);
         if source.destination_ids.is_empty() {
             ui.label(
@@ -3047,7 +3052,10 @@ fn source_settings(
     // Section 3: Lokal inspelning
     card_frame(palette, palette.card_border).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(strong_text("Lokal inspelning", 15.5, palette.text_primary));
+        ui.horizontal(|ui| {
+            ui.label(strong_text("Lokal inspelning", 15.5, palette.text_primary));
+            crate::guide::tip(ui, "Välj var filen ska sparas. Mappknappen låter dig bläddra.");
+        });
         ui.add_space(4.0);
         // Leave room for the label and both folder controls in a narrow window.
         let folder_field_width = (ui.available_width() - 310.0).clamp(174.0, 248.0);
