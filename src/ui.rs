@@ -913,7 +913,9 @@ impl eframe::App for Ui {
                     });
                 });
 
-                ui.add_space(10.0);
+                if self.view != View::ListenerStats {
+                    ui.add_space(10.0);
+                }
 
                 match self.view {
                     View::ListenerStats => {
@@ -1351,7 +1353,6 @@ fn listener_stats_page(
         })
         .inner;
     stats.update(ui.ctx(), servers, refresh);
-    ui.add_space(8.0);
 
     if destinations.is_empty() {
         ui.weak("Lägg till en Icecast-destination under Destinationer för att se lyssnarstatistik.");
