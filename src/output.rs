@@ -56,12 +56,16 @@ impl State {
 }
 
 impl Output {
-    pub fn stream(dest: &Destination, channels: u16) -> Self {
-        let setup = stream_command(dest, channels);
-        Self::start(32, move |receiver, state| match setup {
-            Ok(command) => run_stream(command, receiver, &state),
-            Err(error) => state.set_status(error),
-        })
+    pub fn stream(
+        dest: &Destination,
+        channels: u16,
+        target: &StreamTarget,
+        tls: bool,
+    ) -> Result<Self, &'static str> {
+        let command = stream_command(dest, channels, target, tls)?;
+        Ok(Self::start(32, move |receiver, state| {
+            run_stream(command, receiver, &state);
+        }))
     }
 
     pub fn record(settings: &Recording, name: &str, channels: u16) -> Self {
@@ -253,8 +257,13 @@ impl StreamTarget {
     }
 }
 
-fn stream_command(dest: &Destination, channels: u16) -> Result<Command, &'static str> {
-    let (StreamTarget { host, port, mount }, tls) = StreamTarget::parse(dest)?;
+fn stream_command(
+    dest: &Destination,
+    channels: u16,
+    target: &StreamTarget,
+    tls: bool,
+) -> Result<Command, &'static str> {
+    let StreamTarget { host, port, mount } = target;
     let user = dest.user.trim();
     if user.contains([':', '/', '?', '#', '@', '%']) || user.chars().any(char::is_whitespace) {
         return Err("Icecast-användarnamnet innehåller ogiltiga tecken");

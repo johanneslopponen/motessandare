@@ -87,7 +87,10 @@ fn stream_receiver(
 fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
     let (opus_dest, opus_updates) = stream_receiver("/first.opus", "application/ogg", b"OggS", 2);
     let (mp3_dest, mp3_updates) = stream_receiver("/second.mp3", "audio/mpeg", b"ID3", 1);
-    let streams = [Output::stream(&opus_dest, 1), Output::stream(&mp3_dest, 1)];
+    let streams = [&opus_dest, &mp3_dest].map(|dest| {
+        let (target, tls) = StreamTarget::parse(dest).unwrap();
+        Output::stream(dest, 1, &target, tls).unwrap()
+    });
     let folder = tempfile::tempdir().unwrap();
     let formats = [("WAV", 24), ("FLAC", 24), ("Opus", 96), ("MP3", 128)];
     let mut recordings: Vec<_> = formats

@@ -1,7 +1,7 @@
 use crate::{
     Destination, Source,
     capture::{Capture, Reader},
-    output::{self, Output},
+    output::{self, Output, StreamTarget},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -18,9 +18,25 @@ const FRAMES: usize = 480;
 const PERIOD: Duration = Duration::from_millis(10);
 type Devices = Vec<(String, String, usize)>;
 
+struct Stream {
+    name: String,
+    target: Option<StreamTarget>,
+    output: Result<Output, String>,
+}
+
+impl Stream {
+    fn active(&self) -> bool {
+        self.output.as_ref().is_ok_and(|output| !output.finished())
+    }
+
+    fn uses(&self, target: &StreamTarget) -> bool {
+        self.target.as_ref() == Some(target) && self.active()
+    }
+}
+
 #[derive(Default)]
 struct Session {
-    streams: Vec<(String, Output)>,
+    streams: Vec<Stream>,
     recorder: Option<Output>,
     meters: [ChannelMeter; 2],
     present: bool,
@@ -55,10 +71,24 @@ impl ChannelMeter {
     }
 }
 
+impl Session {
+    fn stop_streams(&mut self, stopping: &mut Vec<Stream>) {
+        for mut stream in self.streams.drain(..) {
+            if let Ok(output) = &mut stream.output
+                && !output.finished()
+            {
+                output.stop();
+                stopping.push(stream);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct Mixer {
     sources: Vec<Source>,
     sessions: HashMap<u64, Session>,
+    stopping_streams: Vec<Stream>,
     finalizing: Vec<(String, Output)>,
 }
 
@@ -140,11 +170,13 @@ impl Engine {
         let mut mixer = self.mixer.lock().unwrap();
         let Mixer {
             sessions,
+            stopping_streams,
             sources: previous,
             ..
         } = &mut *mixer;
         sessions.retain(|id, session| {
             let Some(source) = sources.iter().find(|source| source.id == *id) else {
+                session.stop_streams(stopping_streams);
                 return false;
             };
             if let Some(old) = previous.iter().find(|old| old.id == *id) {
@@ -165,7 +197,7 @@ impl Engine {
             .unwrap()
             .sessions
             .get(&id)
-            .is_some_and(|s| s.streams.iter().any(|(_, output)| !output.finished()))
+            .is_some_and(|s| s.streams.iter().any(Stream::active))
     }
     pub fn recording(&self, id: u64) -> bool {
         self.mixer
@@ -202,14 +234,19 @@ impl Engine {
         let mut status = LiveStatus::default();
         if let Some(session) = mixer.sessions.get(&id) {
             status.total = session.streams.len();
-            for (index, (name, output)) in session.streams.iter().enumerate() {
-                let sending = !output.finished() && !output.encoded_time().is_zero();
-                let detail = output.status();
+            for (index, stream) in session.streams.iter().enumerate() {
+                let (sending, detail) = match &stream.output {
+                    Ok(output) => (
+                        !output.finished() && !output.encoded_time().is_zero(),
+                        output.status(),
+                    ),
+                    Err(error) => (false, error.clone()),
+                };
                 status.connected += usize::from(sending);
-                let name = if name.is_empty() {
+                let name = if stream.name.is_empty() {
                     format!("Sändare {}", index + 1)
                 } else {
-                    name.clone()
+                    stream.name.clone()
                 };
                 if !sending || detail != "Sänder" {
                     status.issues.push(format!("{name} · {detail}"));
@@ -238,20 +275,10 @@ impl Engine {
         results
     }
     pub fn set_stream(&self, source: &Source, destinations: &[Destination], start: bool) {
-        let mut m = self.mixer.lock().unwrap();
-        let s = m.sessions.entry(source.id).or_default();
-        if !start {
-            s.streams.clear();
-        } else if s.streams.iter().all(|(_, output)| output.finished()) {
-            s.streams = source
-                .resolve_destinations(destinations)
-                .into_iter()
-                .map(|d| {
-                    let label = d.name.trim().to_owned();
-                    (label, Output::stream(d, channel_count(source)))
-                })
-                .collect();
-        }
+        self.mixer
+            .lock()
+            .unwrap()
+            .set_stream(source, destinations, start);
     }
     pub fn set_record(&self, source: &Source, start: bool) {
         let mut m = self.mixer.lock().unwrap();
@@ -309,7 +336,69 @@ fn channel_count(source: &Source) -> u16 {
 }
 
 impl Mixer {
+    fn set_stream(&mut self, source: &Source, destinations: &[Destination], start: bool) {
+        let session = self.sessions.entry(source.id).or_default();
+        if !start {
+            session.stop_streams(&mut self.stopping_streams);
+            return;
+        }
+        if session.streams.iter().any(Stream::active) {
+            return;
+        }
+
+        let mut streams = Vec::<Stream>::new();
+        for dest in source.resolve_destinations(destinations) {
+            let (target, output) = match StreamTarget::parse(dest) {
+                Ok((target, tls)) => {
+                    let output = if streams.iter().any(|stream| stream.uses(&target)) {
+                        Err("Samma monteringspunkt är redan vald för den här ljudkällan.".into())
+                    } else if let Some(error) = self.stream_conflict(&target) {
+                        Err(error)
+                    } else {
+                        Output::stream(dest, channel_count(source), &target, tls)
+                            .map_err(str::to_owned)
+                    };
+                    (Some(target), output)
+                }
+                Err(error) => (None, Err(error.into())),
+            };
+            streams.push(Stream {
+                name: dest.name.trim().to_owned(),
+                target,
+                output,
+            });
+        }
+        self.sessions.entry(source.id).or_default().streams = streams;
+    }
+
+    fn stream_conflict(&self, target: &StreamTarget) -> Option<String> {
+        if let Some((&id, _)) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.streams.iter().any(|stream| stream.uses(target)))
+        {
+            let name = self
+                .sources
+                .iter()
+                .find(|source| source.id == id)
+                .map(|source| source.name.trim())
+                .filter(|name| !name.is_empty());
+            return Some(match name {
+                Some(name) => format!("Destinationen används redan av ljudkällan ”{name}”."),
+                None => "Destinationen används redan av en annan ljudkälla.".into(),
+            });
+        }
+        if self.stopping_streams.iter().any(|stream| stream.uses(target)) {
+            return Some(
+                "Sändningen till destinationen håller på att stoppas. Försök igen om en stund."
+                    .into(),
+            );
+        }
+        None
+    }
+
     fn render(&mut self, inputs: &HashMap<String, Block>) {
+        self.stopping_streams.retain(Stream::active);
         for source in &self.sources {
             let session = self.sessions.entry(source.id).or_default();
             let input = inputs.get(&source.device);
@@ -320,7 +409,7 @@ impl Mixer {
             for output in session
                 .streams
                 .iter()
-                .map(|(_, output)| output)
+                .filter_map(|stream| stream.output.as_ref().ok())
                 .chain(session.recorder.iter())
             {
                 output.push(&pcm);
@@ -462,6 +551,81 @@ mod tests {
         assert!(!levels[0].level.clipped);
         levels[0].update(1.01);
         assert!(levels[0].level.clipped);
+    }
+
+    #[test]
+    fn competing_sources_can_only_start_on_unoccupied_mounts() {
+        let first = Source {
+            name: "Mikrofon".into(),
+            destination_ids: vec![1],
+            ..Source::default()
+        };
+        let second = Source {
+            id: 2,
+            destination_ids: vec![2, 3],
+            ..Source::default()
+        };
+        let shared = Destination {
+            id: 1,
+            server: "http://127.0.0.1".into(),
+            ..Destination::default()
+        };
+        let duplicate = Destination {
+            id: 2,
+            name: "Huvudsändning".into(),
+            server: " http://127.0.0.1:80/ignored?setting=ignored ".into(),
+            mount: " //live.opus ".into(),
+            user: "another-user".into(),
+            password: "another-password".into(),
+            codec: "MP3".into(),
+            ..shared.clone()
+        };
+        let separate = Destination {
+            id: 3,
+            mount: "/other.opus".into(),
+            ..shared.clone()
+        };
+        let destinations = [shared, duplicate, separate];
+        let engine = Engine {
+            mixer: Arc::new(Mutex::new(Mixer::default())),
+            inputs: Arc::new(Mutex::new(Inputs::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            workers: Vec::new(),
+        };
+        engine.update(&[first.clone(), second.clone()]);
+
+        engine.set_stream(&first, &destinations, true);
+        engine.set_stream(&second, &destinations, true);
+
+        assert!(engine.streaming(first.id));
+        assert!(engine.streaming(second.id));
+        assert!(engine.live_status(second.id).issues.iter().any(|issue| {
+            issue == "Huvudsändning · Destinationen används redan av ljudkällan ”Mikrofon”."
+        }));
+        {
+            let mixer = engine.mixer.lock().unwrap();
+            let streams = &mixer.sessions[&second.id].streams;
+            assert!(streams[0].output.is_err());
+            assert!(streams[1].output.is_ok());
+        }
+
+        engine.set_stream(&first, &destinations, false);
+        engine.set_stream(&second, &destinations, false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while engine
+            .mixer
+            .lock()
+            .unwrap()
+            .stopping_streams
+            .iter()
+            .any(Stream::active)
+        {
+            assert!(Instant::now() < deadline, "stream workers did not stop");
+            thread::sleep(PERIOD);
+        }
+        engine.set_stream(&second, &destinations, true);
+        let mixer = engine.mixer.lock().unwrap();
+        assert!(mixer.sessions[&second.id].streams[0].output.is_ok());
     }
 
     #[test]
