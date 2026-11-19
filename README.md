@@ -1,6 +1,6 @@
 # Mötessändare
 
-Mötessändare är ett svenskspråkigt skrivbordsprogram för att direktsända mötesljud till Icecast och samtidigt spela in lokalt. Varje ljudkälla har egna ingångskanaler, sändningsmål och inspelningsinställningar. Du kan också använda enbart inspelning eller sändning.
+Mötessändare är ett svenskspråkigt skrivbordsprogram för att direktsända möten till Icecast och samtidigt spela in lokalt. Varje ljudkälla har egna ingångskanaler, sändningsmål och inspelningsinställningar. Du kan också använda enbart inspelning eller sändning.
 
 ## Kom igång
 
