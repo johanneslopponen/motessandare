@@ -189,7 +189,7 @@ fn formats_recording_filename_with_placeholders_and_sanitization() {
     };
     assert_eq!(
         format_recording_stem("{namn}-{datum}-{tid}", "Sal A / Möte", dt),
-        "Sal-A---Möte-2026-11-05-09-04-07"
+        "Sal-A---Möte-2026-11-05-09-04"
     );
     assert_eq!(
         format_recording_stem(
@@ -205,7 +205,7 @@ fn formats_recording_filename_with_placeholders_and_sanitization() {
     );
     assert_eq!(
         format_recording_stem("   ", "Källa 1", dt),
-        "Källa-1-2026-11-05-09-04-07"
+        "2026-11-05 09-04 - Källa-1"
     );
     assert_eq!(
         format_recording_stem("../farlig:fil*namn?", "Källa", dt),

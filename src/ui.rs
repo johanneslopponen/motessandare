@@ -18,6 +18,10 @@ const SAVE_SHORTCUT: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
 const FILENAME_FORMATS: &[(&str, &str)] = &[
+    (
+        "Datum Tid - Namn (standard)",
+        crate::settings::DEFAULT_FILENAME_FORMAT,
+    ),
     ("Namn – Datum – Tid", "{namn}-{datum}-{tid}"),
     ("Datum – Tid – Namn", "{datum}-{tid}-{namn}"),
     ("Datum – Namn", "{datum}-{namn}"),

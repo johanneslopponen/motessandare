@@ -49,7 +49,7 @@ impl Destination {
     }
 }
 
-pub const DEFAULT_FILENAME_FORMAT: &str = "{namn}-{datum}-{tid}";
+pub const DEFAULT_FILENAME_FORMAT: &str = "{datum} {tid} - {namn}";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

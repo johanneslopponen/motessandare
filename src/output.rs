@@ -551,7 +551,7 @@ fn format_recording_stem(template: &str, name: &str, now: LocalDateTime) -> Stri
     };
     let safe_name = sanitize_source_name(name);
     let date = format!("{:04}-{:02}-{:02}", now.year, now.month, now.day);
-    let time = format!("{:02}-{:02}-{:02}", now.hour, now.minute, now.second);
+    let time = format!("{:02}-{:02}", now.hour, now.minute);
     let rendered = template
         .replace("{namn}", &safe_name)
         .replace("{datum}", &date)
