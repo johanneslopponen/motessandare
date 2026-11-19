@@ -693,6 +693,7 @@ fn encode(
             let _ = child.wait();
         }
         let _ = progress_reader.join();
+        state.encoded_us.store(progress.load(Relaxed), Relaxed);
         (writer.join().expect("FFmpeg writer panicked"), result)
     })
 }

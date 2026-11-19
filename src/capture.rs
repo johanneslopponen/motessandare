@@ -407,8 +407,34 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::AudioRing;
+pub(crate) mod tests {
+    use super::{AudioRing, Reader};
+    use std::sync::Arc;
+
+    pub(crate) fn synthetic_reader(channels: usize, rate: u32) -> Reader {
+        Reader {
+            ring: Arc::new(AudioRing::new(channels, 8192)),
+            channels,
+            rate,
+        }
+    }
+
+    pub(crate) fn feed(reader: &Reader, samples: &[f32]) {
+        reader.ring.push(samples);
+    }
+
+    #[test]
+    fn cloned_readers_share_consumption_and_pcm_is_normalized() {
+        let reader = synthetic_reader(2, 48_000);
+        reader.ring.push(&[i16::MIN, 0, 16_384, -16_384]);
+        let clone = reader.clone();
+
+        assert_eq!(reader.queued_frames(), Some(2));
+        assert_eq!(clone.read(1), Some((vec![-1.0, 0.0], 2, 48_000)));
+        assert_eq!(reader.queued_frames(), Some(1));
+        assert_eq!(reader.read(8), Some((vec![0.5, -0.5], 2, 48_000)));
+        assert_eq!(clone.queued_frames(), Some(0));
+    }
 
     #[test]
     fn overflow_preserves_existing_frames_and_wraps_in_channel_order() {

@@ -514,6 +514,77 @@ impl Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::tests::{feed, synthetic_reader};
+
+    #[test]
+    fn converter_preserves_fractional_phase_and_channels_across_blocks() {
+        let input_rate = 32_003;
+        let reader = synthetic_reader(2, input_rate);
+        let samples: Vec<_> = (0..2500)
+            .flat_map(|index| {
+                let value = index as f32 / 4096.;
+                [value, -value]
+            })
+            .collect();
+        feed(&reader, &samples);
+
+        let mut converter = Converter::default();
+        for block_index in 0..2 {
+            let block = converter.pull(&reader).unwrap();
+            assert_eq!(block.channels, 2);
+            assert_eq!(block.samples.len(), FRAMES * 2);
+            for (index, frame) in block.samples.chunks_exact(2).enumerate() {
+                let output_index = block_index * FRAMES + index;
+                let expected = output_index as f32 * input_rate as f32 / RATE as f32 / 4096.;
+                assert!((frame[0] - expected).abs() < 1e-6, "frame {output_index}");
+                assert_eq!(frame[1], -frame[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn converter_pads_underrun_and_rebuffers_before_resuming() {
+        let reader = synthetic_reader(1, RATE as u32);
+        let mut converter = Converter::default();
+        feed(&reader, &[0.75; 1439]);
+        assert!(converter.pull(&reader).is_none());
+        feed(&reader, &[0.75]);
+        assert_eq!(converter.pull(&reader).unwrap().samples, vec![0.75; FRAMES]);
+
+        // Simulate the input drying up after the converter's retained lookahead.
+        reader.read(usize::MAX).unwrap();
+        let block = converter.pull(&reader).unwrap();
+        assert_eq!(block.samples.len(), FRAMES);
+        assert_eq!(block.samples[0], 0.75);
+        assert!(block.samples[2..].iter().all(|&sample| sample == 0.));
+
+        feed(&reader, &[-0.5; 1439]);
+        assert!(converter.pull(&reader).is_none());
+        feed(&reader, &[-0.5]);
+        assert_eq!(converter.pull(&reader).unwrap().samples, vec![-0.5; FRAMES]);
+    }
+
+    #[test]
+    fn device_removal_discards_converter_history_before_replug() {
+        let reader = synthetic_reader(2, RATE as u32);
+        let mut readers = HashMap::from([("device".into(), reader.clone())]);
+        let mut converters = HashMap::new();
+        feed(&reader, &[0.75; 1440 * 2]);
+        assert!(read_inputs(&readers, &mut converters).contains_key("device"));
+
+        readers.clear();
+        assert!(read_inputs(&readers, &mut converters).is_empty());
+
+        let replacement = synthetic_reader(2, RATE as u32);
+        feed(&replacement, &[-0.5; 1439 * 2]);
+        readers.insert("device".into(), replacement.clone());
+        assert!(read_inputs(&readers, &mut converters).is_empty());
+        feed(&replacement, &[-0.5, -0.5]);
+        assert_eq!(
+            read_inputs(&readers, &mut converters)["device"].samples,
+            vec![-0.5; FRAMES * 2]
+        );
+    }
 
     #[test]
     fn meter_holds_short_peak_and_latches_each_channel_until_reset() {

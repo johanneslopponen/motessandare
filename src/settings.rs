@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Write, path::PathBuf};
+use std::{collections::HashSet, env, fs, io::Write, path::PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -142,29 +142,19 @@ impl Settings {
         }
         id
     }
+}
 
-    fn sanitize(&mut self) {
-        let mut used_ids = Vec::new();
-        for dest in &mut self.destinations {
-            if dest.id == 0 || used_ids.contains(&dest.id) {
-                let mut id = 1;
-                while used_ids.contains(&id) {
-                    id += 1;
-                }
-                dest.id = id;
+fn repair_ids<T>(items: &mut [T], id_of: impl Fn(&mut T) -> &mut u64) {
+    let mut reserved_ids: HashSet<u64> = items.iter_mut().map(|item| *id_of(item)).collect();
+    let mut seen_ids = HashSet::new();
+    let mut next_id = 1;
+    for item in items {
+        let id = id_of(item);
+        if *id == 0 || !seen_ids.insert(*id) {
+            while !reserved_ids.insert(next_id) {
+                next_id += 1;
             }
-            used_ids.push(dest.id);
-        }
-        for source in &mut self.sources {
-            let mut seen = Vec::new();
-            source.destination_ids.retain(|id| {
-                let valid = self.destinations.iter().any(|dest| dest.id == *id)
-                    && !seen.contains(id);
-                if valid {
-                    seen.push(*id);
-                }
-                valid
-            });
+            *id = next_id;
         }
     }
 }
@@ -187,7 +177,7 @@ impl Default for RawSource {
     fn default() -> Self {
         let defaults = Source::default();
         Self {
-            id: defaults.id,
+            id: 0,
             name: defaults.name,
             device: defaults.device,
             device_name: defaults.device_name,
@@ -216,16 +206,27 @@ enum StoredSettings {
     LegacyArray(Vec<RawSource>),
 }
 
-fn migrate_raw(destinations: Vec<Destination>, raw_sources: Vec<RawSource>, compact_overview: Option<bool>) -> Settings {
+fn migrate_raw(
+    destinations: Vec<Destination>,
+    raw_sources: Vec<RawSource>,
+    compact_overview: Option<bool>,
+) -> Settings {
+    let original_ids: HashSet<u64> = destinations
+        .iter()
+        .map(|dest| dest.id)
+        .filter(|id| *id != 0)
+        .collect();
     let mut settings = Settings {
         compact_overview,
         destinations,
         sources: Vec::with_capacity(raw_sources.len()),
     };
-    settings.sanitize();
+    repair_ids(&mut settings.destinations, |destination| &mut destination.id);
 
     for raw in raw_sources {
+        let mut seen = HashSet::new();
         let mut destination_ids = raw.destination_ids;
+        destination_ids.retain(|id| original_ids.contains(id) && seen.insert(*id));
         for mut inline_dest in raw.destinations {
             let id = if let Some(existing) = settings
                 .destinations
@@ -257,7 +258,7 @@ fn migrate_raw(destinations: Vec<Destination>, raw_sources: Vec<RawSource>, comp
             recording: raw.recording,
         });
     }
-    settings.sanitize();
+    repair_ids(&mut settings.sources, |source| &mut source.id);
     settings
 }
 
@@ -647,6 +648,79 @@ mod tests {
 
         let loaded = load_plain(&file).unwrap();
         assert_eq!(loaded.sources[0].destination_ids, vec![5]);
+    }
+
+    #[test]
+    fn repairing_invalid_destination_ids_preserves_existing_source_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        let json = r#"{
+            "destinations": [
+                { "name": "Saknar id", "mount": "/unassigned.opus" },
+                { "id": 1, "name": "Huvud", "mount": "/main.opus" },
+                { "id": 1, "name": "Dubblett", "mount": "/duplicate.opus" },
+                { "id": 2, "name": "Reserv", "mount": "/backup.opus" }
+            ],
+            "sources": [
+                { "id": 1, "name": "Källa", "destination_ids": [1, 2, 0, 3, 4] }
+            ]
+        }"#;
+        fs::write(&file, json).unwrap();
+
+        let loaded = load_plain(&file).unwrap();
+        let mounts: Vec<_> = loaded.sources[0]
+            .resolve_destinations(&loaded.destinations)
+            .into_iter()
+            .map(|dest| dest.mount.as_str())
+            .collect();
+        assert_eq!(mounts, ["/main.opus", "/backup.opus"]);
+        assert_eq!(
+            loaded
+                .destinations
+                .iter()
+                .map(|dest| dest.id)
+                .collect::<Vec<_>>(),
+            [3, 1, 4, 2]
+        );
+    }
+
+    #[test]
+    fn repairs_missing_and_duplicate_source_ids_in_a_legacy_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        fs::write(
+            &file,
+            r#"{
+                "sources": [
+                    { "name": "Utan id", "device": "mic-a" },
+                    { "id": 1, "name": "Första", "device": "mic-b" },
+                    { "id": 1, "name": "Dubblett", "device": "mic-c" },
+                    { "id": 2, "name": "Andra", "device": "mic-d" },
+                    { "name": "Också utan id", "device": "mic-e" }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_plain(&file).unwrap();
+        let source_devices: Vec<_> = loaded
+            .sources
+            .iter()
+            .map(|source| (source.id, source.device.as_str()))
+            .collect();
+        assert_eq!(
+            source_devices,
+            [
+                (3, "mic-a"),
+                (1, "mic-b"),
+                (4, "mic-c"),
+                (2, "mic-d"),
+                (5, "mic-e")
+            ]
+        );
+        assert_eq!(loaded.next_source_id(), 6);
+        save_plain(&file, &loaded).unwrap();
+        assert_eq!(load_plain(&file).unwrap(), loaded);
     }
 
     #[test]

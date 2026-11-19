@@ -262,6 +262,46 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keeps_last_counts_until_replaced_and_reports_fetch_errors() {
+        let target = StatsTarget {
+            server: "http://example.invalid".into(),
+            mount: "/live".into(),
+        };
+        let mut stats = ListenerStats::default();
+        assert!(matches!(stats.status(&target), MountStatus::Loading));
+        let counts = ListenerCounts {
+            current: Some(4),
+            peak: Some(6),
+        };
+        let (sender, receiver) = mpsc::channel();
+        stats.servers.insert(
+            target.server.clone(),
+            ServerStats {
+                pending: Some(receiver),
+                result: Some(Ok(HashMap::from([(target.mount.clone(), counts)]))),
+                next_refresh: Some(Instant::now() + REFRESH_INTERVAL),
+            },
+        );
+        let servers = HashSet::from([target.server.as_str()]);
+        let ctx = Context::default();
+        stats.update(&ctx, servers.clone(), true);
+        assert!(stats.refreshing());
+        assert!(
+            matches!(stats.status(&target), MountStatus::Listed(counts) if counts.current == Some(4))
+        );
+
+        sender.send(Err("Serverfel".into())).unwrap();
+        stats.update(&ctx, servers, false);
+        assert!(!stats.refreshing());
+        assert!(matches!(
+            stats.status(&target),
+            MountStatus::Unavailable("Serverfel")
+        ));
+        stats.update(&ctx, HashSet::new(), false);
+        assert!(matches!(stats.status(&target), MountStatus::Loading));
+    }
+
+    #[test]
     #[ignore = "requires local TCP access"]
     fn fetches_public_status_over_http() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

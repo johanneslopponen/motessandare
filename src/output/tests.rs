@@ -224,3 +224,71 @@ fn reserve_recording_path_avoids_overwriting_existing_files() {
     assert_eq!(second.file_name().unwrap(), "mote-Sal-1-2.flac");
     assert_eq!(third.file_name().unwrap(), "mote-Sal-1-3.flac");
 }
+
+#[test]
+fn reports_recording_folder_failure_without_returning_a_saved_path() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("file");
+    fs::write(&file, b"existing content").unwrap();
+    let settings = Recording {
+        folder: file.join("subfolder").display().to_string(),
+        format: "WAV".into(),
+        ..Recording::default()
+    };
+    let recording = Output::record(&settings, "Sal", 1);
+    wait_for_shutdown();
+    assert!(recording.finished());
+    assert!(
+        recording
+            .recording_result()
+            .unwrap_err()
+            .starts_with("Kunde inte skapa inspelningsfilen:")
+    );
+    assert_eq!(fs::read(file).unwrap(), b"existing content");
+}
+
+#[test]
+#[ignore = "requires FFmpeg"]
+fn finalizes_queued_stereo_audio_and_reports_its_full_duration() {
+    let folder = tempfile::tempdir().unwrap();
+    let settings = Recording {
+        folder: folder.path().display().to_string(),
+        format: "WAV".into(),
+        quality: 24,
+        ..Recording::default()
+    };
+    let mut recording = Output::record(&settings, "Sal", 2);
+    let input: Vec<f32> = tone(0.25)
+        .into_iter()
+        .flat_map(|left| [left, -2.0 * left])
+        .collect();
+    for _ in 0..12 {
+        recording.push(&input);
+    }
+    recording.stop();
+    wait_for_shutdown();
+    assert!(recording.finished());
+    let path = recording.recording_result().unwrap();
+
+    let decoded = Command::new(ffmpeg_path())
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+        .output()
+        .unwrap();
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    assert_eq!(decoded.stdout.len(), 12 * input.len() * size_of::<f32>());
+    for (bytes, expected) in decoded.stdout.chunks_exact(4).zip(input.iter().cycle()) {
+        let actual = f32::from_le_bytes(bytes.try_into().unwrap());
+        assert!((actual - expected).abs() < 1e-6);
+    }
+    let reported = recording.encoded_time();
+    assert!(
+        reported.abs_diff(Duration::from_millis(240)) <= Duration::from_micros(21),
+        "FFmpeg reported {reported:?} for 240 ms of audio"
+    );
+}
