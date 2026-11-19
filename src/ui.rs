@@ -196,6 +196,7 @@ enum View {
 enum StopConfirm {
     Streams,
     Recordings,
+    Close { discard_changes: bool },
 }
 
 #[derive(Default)]
@@ -236,6 +237,7 @@ pub struct Ui {
     confirm_stop: Option<StopConfirm>,
     app_icon: Option<TextureHandle>,
     close_blocked: bool,
+    close_confirmed: bool,
     load_blocked: bool,
 }
 
@@ -281,6 +283,7 @@ impl Ui {
             confirm_stop: None,
             app_icon,
             close_blocked: false,
+            close_confirmed: false,
             load_blocked,
         }
     }
@@ -458,47 +461,46 @@ impl Ui {
         let Some(kind) = self.confirm_stop else {
             return;
         };
-        let active_count = match kind {
-            StopConfirm::Streams => self
-                .settings
-                .sources
-                .iter()
-                .filter(|source| self.engine.streaming(source.id))
-                .count(),
-            StopConfirm::Recordings => self
-                .settings
-                .sources
-                .iter()
-                .filter(|source| self.engine.recording(source.id))
-                .count(),
-        };
-        if active_count == 0 {
-            self.confirm_stop = None;
-            return;
-        }
+        let sources = &self.settings.sources;
+        let streams = sources.iter().filter(|s| self.engine.streaming(s.id)).count();
+        let recordings = sources.iter().filter(|s| self.engine.recording(s.id)).count();
 
         let (title, body) = match kind {
-            StopConfirm::Streams => (
+            StopConfirm::Streams if streams > 0 => (
                 "Stoppa alla sändningar?",
-                if active_count == 1 {
+                if streams == 1 {
                     "1 pågående sändning kommer att stoppas.".to_owned()
                 } else {
-                    format!("{active_count} pågående sändningar kommer att stoppas.")
+                    format!("{streams} pågående sändningar kommer att stoppas.")
                 },
             ),
-            StopConfirm::Recordings => (
+            StopConfirm::Recordings if recordings > 0 => (
                 "Stoppa alla inspelningar?",
-                if active_count == 1 {
+                if recordings == 1 {
                     "1 pågående inspelning kommer att stoppas.".to_owned()
                 } else {
-                    format!("{active_count} pågående inspelningar kommer att stoppas.")
+                    format!("{recordings} pågående inspelningar kommer att stoppas.")
                 },
             ),
+            StopConfirm::Close { .. } => (
+                "Stäng Mötessändaren?",
+                match (streams > 0, recordings > 0) {
+                    (true, true) => "Pågående sändningar och inspelningar stoppas.",
+                    (true, false) => "Pågående sändningar stoppas.",
+                    (false, true) => "Pågående inspelningar stoppas.",
+                    (false, false) => "Sändningar och inspelningar har avslutats.",
+                }.to_owned(),
+            ),
+            _ => {
+                self.confirm_stop = None;
+                return;
+            }
         };
 
         let mut confirmed = false;
         let mut cancelled = false;
-        let modal = egui::Modal::new(egui::Id::new("confirm-stop-modal"))
+        let closing = matches!(kind, StopConfirm::Close { .. });
+        let modal = egui::Modal::new(egui::Id::new(("confirm-stop-modal", closing)))
             .frame(
                 Frame::new()
                     .fill(palette.card_bg)
@@ -518,7 +520,7 @@ impl Ui {
                     if action_button(
                         ui,
                         Icon::Stop,
-                        "Stoppa",
+                        if closing { "Stäng" } else { "Stoppa" },
                         true,
                         Color32::WHITE,
                         ButtonVariant::Danger,
@@ -536,6 +538,13 @@ impl Ui {
 
         if confirmed {
             match kind {
+                StopConfirm::Close { discard_changes } => {
+                    if discard_changes {
+                        self.save_state = SaveState::Idle;
+                    }
+                    self.close_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 StopConfirm::Streams => {
                     for source in &self.settings.sources {
                         if self.engine.streaming(source.id) {
@@ -791,11 +800,21 @@ impl Ui {
                     )
                     .clicked()
                 {
-                    self.save_state = SaveState::Idle;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    if self.has_active_outputs() {
+                        self.confirm_stop = Some(StopConfirm::Close { discard_changes: true });
+                    } else {
+                        self.save_state = SaveState::Idle;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
             });
         }
+    }
+
+    fn has_active_outputs(&self) -> bool {
+        self.settings.sources.iter().any(|s| {
+            self.engine.streaming(s.id) || self.engine.recording(s.id)
+        })
     }
 }
 
@@ -1289,6 +1308,12 @@ impl eframe::App for Ui {
                 Err(error) => self.notice = Some(format!("Kunde inte slutföra inspelningen för {source}. {error}")),
             }
         }
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        let guard_close =
+            closing && guard_active_close(ctx, self.close_confirmed, self.has_active_outputs());
+        if guard_close {
+            self.confirm_stop = Some(StopConfirm::Close { discard_changes: false });
+        }
         if self.confirm_stop.is_some() {
             self.stop_confirm_modal(ctx, palette);
         } else if let Some(recording) = self.saved_recordings.front_mut()
@@ -1297,11 +1322,12 @@ impl eframe::App for Ui {
             self.saved_recordings.pop_front();
         }
 
-        let closing = ctx.input(|input| input.viewport().close_requested());
+        let closing = closing && !guard_close;
         let now = Instant::now();
         if self.save_state.due(now) || (closing && self.save_state.dirty()) {
             self.save();
             if closing && self.save_state.dirty() {
+                self.close_confirmed = false;
                 self.close_blocked = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
@@ -1322,6 +1348,14 @@ impl eframe::App for Ui {
         }
         ctx.request_repaint_after(repaint_after);
     }
+}
+
+fn guard_active_close(ctx: &Context, confirmed: bool, active: bool) -> bool {
+    if confirmed || !active {
+        return false;
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    true
 }
 
 fn listener_stats_page(
@@ -3631,6 +3665,23 @@ fn choice(ui: &mut EguiUi, id: &str, current: &mut String, values: &[&str]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_window_close_requires_explicit_confirmation() {
+        let ctx = Context::default();
+        for (active, confirmed, blocked) in [
+            (true, false, true),
+            (true, false, true), // A second close request is still not confirmation.
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let output = ctx.run(Default::default(), |ctx| {
+                assert_eq!(guard_active_close(ctx, confirmed, active), blocked);
+            });
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(commands.contains(&egui::ViewportCommand::CancelClose), blocked);
+        }
+    }
 
     #[test]
     fn inline_destination_validation_identifies_fields_that_need_attention() {
