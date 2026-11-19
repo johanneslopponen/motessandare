@@ -1,4 +1,5 @@
 use crate::engine::MeterLevel;
+use crate::listener_stats::{ListenerStats, MountStatus, StatsTarget};
 use crate::{Destination, Engine, Settings, Source, settings_load, settings_save};
 use eframe::egui::{
     self, Align, Color32, ColorImage, ComboBox, Context, CornerRadius, FontData, FontDefinitions,
@@ -166,6 +167,7 @@ impl Palette {
 #[derive(Clone, Copy)]
 enum Icon {
     Help,
+    ListenerStats,
     Broadcast,
     BroadcastStop,
     Record,
@@ -182,6 +184,7 @@ enum View {
     Overview,
     SourceSettings,
     Destinations,
+    ListenerStats,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,6 +222,7 @@ pub struct Ui {
     settings: Settings,
     selected_source: Option<u64>,
     view: View,
+    listener_stats: ListenerStats,
     save_state: SaveState,
     notice: Option<String>,
     remove_source: bool,
@@ -262,6 +266,7 @@ impl Ui {
             settings,
             selected_source,
             view: View::Overview,
+            listener_stats: ListenerStats::default(),
             save_state: SaveState::Idle,
             saved_recordings: Default::default(),
             notice,
@@ -525,7 +530,11 @@ impl Ui {
 
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
-            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.spacing_mut().item_spacing.x = if ui.available_width() < 550.0 {
+                6.0
+            } else {
+                10.0
+            };
             if let Some(icon) = &self.app_icon {
                 ui.add(
                     egui::Image::new((icon.id(), Vec2::splat(26.0)))
@@ -541,6 +550,28 @@ impl Ui {
             .clicked()
             {
                 crate::guide::set_enabled(ui.ctx(), !help);
+            }
+            let showing_stats = self.view == View::ListenerStats;
+            if icon_button(
+                ui,
+                Icon::ListenerStats,
+                !self.load_blocked,
+                palette.text_secondary,
+                showing_stats,
+                palette,
+                if showing_stats {
+                    "Stäng lyssnarstatistiken"
+                } else {
+                    "Visa lyssnarstatistik"
+                },
+            )
+            .clicked()
+            {
+                self.navigate(if showing_stats {
+                    View::Overview
+                } else {
+                    View::ListenerStats
+                });
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -772,7 +803,7 @@ impl eframe::App for Ui {
                         ui.set_height(30.0);
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        if self.view != View::Destinations
+                        if matches!(self.view, View::Overview | View::SourceSettings)
                             && action_button(
                                 ui,
                                 Icon::Plus,
@@ -802,6 +833,14 @@ impl eframe::App for Ui {
                 ui.add_space(10.0);
 
                 match self.view {
+                    View::ListenerStats => {
+                        listener_stats_page(
+                            ui,
+                            palette,
+                            &self.settings.destinations,
+                            &mut self.listener_stats,
+                        );
+                    }
                     View::Overview => {
                         if self.settings.sources.is_empty() {
                             empty_sources_view(ui, palette, || self.add_source());
@@ -1197,6 +1236,96 @@ impl eframe::App for Ui {
     }
 }
 
+fn listener_stats_page(
+    ui: &mut EguiUi,
+    palette: Palette,
+    destinations: &[Destination],
+    stats: &mut ListenerStats,
+) {
+    let targets: Vec<_> = destinations.iter().map(StatsTarget::parse).collect();
+    let servers: std::collections::HashSet<_> = targets
+        .iter()
+        .filter_map(|target| target.as_ref().ok().map(|target| target.server.as_str()))
+        .collect();
+    let refresh = ui
+        .horizontal(|ui| {
+            ui.label(strong_text("Lyssnarstatistik", 18.0, palette.text_primary));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refreshing = stats.refreshing();
+                let clicked = text_button(
+                    ui,
+                    "Uppdatera",
+                    !servers.is_empty() && !refreshing,
+                    ButtonVariant::Neutral,
+                    palette,
+                )
+                .clicked();
+                if refreshing {
+                    ui.spinner();
+                }
+                clicked
+            })
+            .inner
+        })
+        .inner;
+    stats.update(ui.ctx(), servers, refresh);
+    ui.add_space(8.0);
+
+    if destinations.is_empty() {
+        ui.weak("Lägg till en Icecast-destination under Destinationer för att se lyssnarstatistik.");
+        return;
+    }
+
+    ScrollArea::vertical().id_salt("listener_stats").show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        for (destination, target) in destinations.iter().zip(&targets) {
+            card_frame(palette, palette.card_border).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(strong_text(destination.display_name(), 15.0, palette.text_primary));
+                let target = match target {
+                    Ok(target) => target,
+                    Err(error) => {
+                        ui.colored_label(palette.warning, *error);
+                        return;
+                    }
+                };
+                ui.weak(format!("{}{}", target.server, target.mount));
+                match stats.status(target) {
+                    MountStatus::Loading => {
+                        ui.weak("Hämtar statistik…");
+                    }
+                    MountStatus::Unavailable(error) => {
+                        ui.colored_label(palette.warning, error);
+                    }
+                    MountStatus::Absent => {
+                        ui.weak("Monteringspunkten visas inte i serverns statistik.");
+                    }
+                    MountStatus::Listed(counts) => {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 28.0;
+                            let metrics = [
+                                ("Lyssnare nu", counts.current),
+                                ("Lyssnartopp", counts.peak),
+                            ];
+                            for (label, count) in metrics {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.weak(label);
+                                    let value = count.map_or_else(
+                                        || "—".to_owned(),
+                                        |count| count.to_string(),
+                                    );
+                                    ui.label(strong_text(value, 24.0, palette.text_primary));
+                                });
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+}
+
 fn configure_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
 
@@ -1358,6 +1487,15 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Help => {
             painter.circle_stroke(c, r * 0.93, Stroke::new(1.3, color));
             painter.text(c, egui::Align2::CENTER_CENTER, "?", FontId::proportional(r * 1.55), color);
+        }
+        Icon::ListenerStats => {
+            for (x, height) in [(-0.64, 0.65), (0.0, 1.14), (0.64, 1.60)] {
+                let bottom = c + Vec2::new(x * r, r * 0.8);
+                painter.line_segment(
+                    [bottom, bottom - Vec2::new(0.0, r * height)],
+                    Stroke::new(2.0, color),
+                );
+            }
         }
         Icon::Broadcast => {
             painter.circle_filled(c, (r * 0.22).max(1.8), color);

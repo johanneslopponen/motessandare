@@ -13,6 +13,8 @@ Välj **Kompakt översikt** för att se fler källor samtidigt. Nivåmätarens t
 
 När du stoppar en inspelning och filen är färdigskriven kan du byta namn på den. **Spara namn** håller dialogen öppen så att du kan visa filen i Utforskaren eller Finder. **Klar** stänger dialogen.
 
+Öppna **Lyssnarstatistik** med diagramikonen bredvid **?**. Vyn hämtar antalet anslutna lyssnare och lyssnartoppen per destination från Icecasts publika `/status-json.xsl`. Siffrorna uppdateras var tionde sekund medan vyn är öppen. Lyssnartoppen gäller den pågående sändningsanslutningen.
+
 ## Kör från källkod
 
 Installera Rust med Cargo och en FFmpeg-version med stöd för Icecast, libopus och libmp3lame. Appen kan använda FFmpeg från din `PATH` eller från samma katalog som den byggda programfilen. På Windows heter filen `ffmpeg.exe`.

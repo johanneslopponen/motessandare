@@ -214,29 +214,53 @@ fn ffmpeg(channels: u16) -> Command {
     command
 }
 
-fn stream_command(dest: &Destination, channels: u16) -> Result<Command, &'static str> {
-    let mut server = Url::parse(dest.server.trim()).map_err(|_| "Ogiltig serveradress")?;
-    let tls = match server.scheme() {
-        "http" => false,
-        "https" => true,
-        _ => return Err("Serveradressen måste börja med http:// eller https://"),
-    };
-    let port = server.port_or_known_default().ok_or("Ogiltig serverport")?;
-    let host = server
-        .host()
-        .ok_or("Serveradressen saknar värdnamn")?
-        .to_string();
-    let mount = dest.mount.trim().trim_start_matches('/');
-    if mount.is_empty() || mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
-        return Err("Ogiltig monteringspunkt");
+#[derive(PartialEq, Eq)]
+pub struct StreamTarget {
+    host: String,
+    port: u16,
+    mount: String,
+}
+
+impl StreamTarget {
+    pub fn mount(&self) -> &str {
+        &self.mount
     }
-    server.set_path(&format!("/{mount}"));
+
+    pub fn server_url(&self, tls: bool) -> String {
+        let scheme = if tls { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.port)
+    }
+
+    pub fn parse(dest: &Destination) -> Result<(Self, bool), &'static str> {
+        let mut server = Url::parse(dest.server.trim()).map_err(|_| "Ogiltig serveradress")?;
+        let tls = match server.scheme() {
+            "http" => false,
+            "https" => true,
+            _ => return Err("Serveradressen måste börja med http:// eller https://"),
+        };
+        let port = server.port_or_known_default().ok_or("Ogiltig serverport")?;
+        let host = server
+            .host()
+            .ok_or("Serveradressen saknar värdnamn")?
+            .to_string();
+        let mount = dest.mount.trim().trim_start_matches('/');
+        if mount.is_empty() || mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
+            return Err("Ogiltig monteringspunkt");
+        }
+        server.set_path(&format!("/{mount}"));
+        let mount = server.path().to_owned();
+        Ok((Self { host, port, mount }, tls))
+    }
+}
+
+fn stream_command(dest: &Destination, channels: u16) -> Result<Command, &'static str> {
+    let (StreamTarget { host, port, mount }, tls) = StreamTarget::parse(dest)?;
     let user = dest.user.trim();
     if user.contains([':', '/', '?', '#', '@', '%']) || user.chars().any(char::is_whitespace) {
         return Err("Icecast-användarnamnet innehåller ogiltiga tecken");
     }
     let user = if user.is_empty() { "source" } else { user };
-    let endpoint = format!("icecast://{user}@{host}:{port}{}", server.path());
+    let endpoint = format!("icecast://{user}@{host}:{port}{mount}");
     let (encoder, muxer, content_type) = match dest.codec.as_str() {
         "Opus" => ("libopus", "ogg", "application/ogg"),
         "MP3" => ("libmp3lame", "mp3", "audio/mpeg"),
