@@ -1285,10 +1285,10 @@ impl eframe::App for Ui {
         }
         if self.confirm_stop.is_some() {
             self.stop_confirm_modal(ctx, palette);
-        } else if let Some(recording) = self.saved_recordings.front_mut() {
-            if recording.show(ctx) {
-                self.saved_recordings.pop_front();
-            }
+        } else if let Some(recording) = self.saved_recordings.front_mut()
+            && recording.show(ctx)
+        {
+            self.saved_recordings.pop_front();
         }
 
         let closing = ctx.input(|input| input.viewport().close_requested());

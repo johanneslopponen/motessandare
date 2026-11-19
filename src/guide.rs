@@ -37,24 +37,14 @@ mod tests {
     #[test]
     fn clicking_a_hint_shows_only_the_local_text() {
         let ctx = Context::default();
-        let mut center = Pos2::ZERO;
-        let mut frame = |events| {
-            ctx.run(
-                RawInput {
-                    events,
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let group = ui.scope(|ui| tip(ui, "Välj din mikrofon."));
-                        center = group.response.rect.center();
-                    });
-                },
-            )
-        };
         set_enabled(&ctx, true);
-        frame(vec![]);
-        drop(frame);
+        let mut center = Pos2::ZERO;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let group = ui.scope(|ui| tip(ui, "Välj din mikrofon."));
+                center = group.response.rect.center();
+            });
+        });
         let mut visible = false;
         for pressed in [true, false, false] {
             let events = vec![
