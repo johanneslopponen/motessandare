@@ -14,8 +14,8 @@ use std::{
 };
 
 const RATE: usize = 48_000;
-const FRAMES: usize = 480;
-const PERIOD: Duration = Duration::from_millis(10);
+pub(super) const BLOCK_DURATION: Duration = Duration::from_millis(10);
+const FRAMES: usize = RATE * BLOCK_DURATION.as_millis() as usize / 1000;
 type Devices = Vec<(String, String, usize)>;
 
 struct Stream {
@@ -66,7 +66,7 @@ impl ChannelMeter {
             // About 18 dB/s on the mixer's 10 ms clock.
             self.level.held = (self.level.held * 0.98).max(self.level.signal);
         } else {
-            self.hold_remaining = self.hold_remaining.saturating_sub(PERIOD);
+            self.hold_remaining = self.hold_remaining.saturating_sub(BLOCK_DURATION);
         }
     }
 }
@@ -145,7 +145,7 @@ impl Engine {
                 while !stop.load(Ordering::Acquire) {
                     let blocks = read_inputs(&inputs.lock().unwrap().readers, &mut converters);
                     mixer.lock().unwrap().render(&blocks);
-                    next += PERIOD;
+                    next += BLOCK_DURATION;
                     let now = Instant::now();
                     if now.saturating_duration_since(next) > Duration::from_millis(250) {
                         // Do not enqueue hours of obsolete audio after system sleep.
@@ -692,7 +692,7 @@ mod tests {
             .any(Stream::active)
         {
             assert!(Instant::now() < deadline, "stream workers did not stop");
-            thread::sleep(PERIOD);
+            thread::sleep(BLOCK_DURATION);
         }
         engine.set_stream(&second, &destinations, true);
         let mixer = engine.mixer.lock().unwrap();

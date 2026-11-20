@@ -17,12 +17,16 @@ use std::{
 
 use url::Url;
 
-use crate::{Destination, Recording};
+use crate::{Destination, Recording, engine::BLOCK_DURATION};
 
 const POLL: Duration = Duration::from_millis(50);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 const STALL_TIMEOUT: Duration = Duration::from_secs(12);
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(8);
+// FFmpeg can stop reading stdin while it waits for the Icecast handshake.
+// Keep the mixer's audio in order for as long as we allow a blocked write.
+const STREAM_QUEUE_BLOCKS: usize =
+    STALL_TIMEOUT.as_millis().div_ceil(BLOCK_DURATION.as_millis()) as usize;
 
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -63,7 +67,7 @@ impl Output {
         tls: bool,
     ) -> Result<Self, &'static str> {
         let command = stream_command(dest, channels, target, tls)?;
-        Ok(Self::start(32, move |receiver, state| {
+        Ok(Self::start(STREAM_QUEUE_BLOCKS, move |receiver, state| {
             run_stream(command, receiver, &state);
         }))
     }
