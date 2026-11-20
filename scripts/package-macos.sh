@@ -39,14 +39,11 @@ fi
 
 opus=1.6.1
 lame=4.0
-openssl=3.5.9
 ffmpeg=8.1.3
 fetch "opus-$opus.tar.gz" 6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1 \
     "https://downloads.xiph.org/releases/opus/opus-$opus.tar.gz"
 fetch "lame-$lame.tar.gz" 3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb \
     "https://downloads.sourceforge.net/project/lame/lame/$lame/lame-$lame.tar.gz"
-fetch "openssl-$openssl.tar.gz" 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a \
-    "https://github.com/openssl/openssl/releases/download/openssl-$openssl/openssl-$openssl.tar.gz"
 fetch "ffmpeg-$ffmpeg.tar.xz" 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3 \
     "https://ffmpeg.org/releases/ffmpeg-$ffmpeg.tar.xz"
 
@@ -63,22 +60,15 @@ fetch "ffmpeg-$ffmpeg.tar.xz" 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c111223
     make install
 )
 (
-    cd "$work/openssl-$openssl"
-    perl Configure darwin64-arm64-cc no-shared no-module no-tests \
-        --prefix="$prefix" --libdir=lib --openssldir=/private/etc/ssl
-    make -j "$jobs"
-    make install_sw
-)
-(
     cd "$work/ffmpeg-$ffmpeg"
     ./configure \
         --disable-autodetect --disable-everything --disable-shared --enable-static \
         --disable-doc --disable-ffplay --disable-ffprobe --disable-avdevice \
         --enable-version3 --enable-small \
-        --enable-libopus --enable-libmp3lame --enable-openssl \
+        --enable-libopus --enable-libmp3lame --disable-network \
         --pkg-config-flags=--static \
         --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib" \
-        --enable-protocol=file,pipe,http,https,httpproxy,icecast,tcp,tls \
+        --enable-protocol=pipe,fd \
         --enable-demuxer=pcm_f32le \
         --enable-decoder=pcm_f32le \
         --enable-muxer=ogg,mp3,wav,flac \
@@ -97,7 +87,7 @@ check_binary() {
 
 check_binary "$encoder"
 "$encoder" -hide_banner -protocols > "$work/protocols.txt"
-for protocol in icecast https tls; do
+for protocol in pipe fd; do
     grep -Eq "^[[:space:]]+$protocol$" "$work/protocols.txt"
 done
 
@@ -106,7 +96,7 @@ for spec in 'libopus ogg' 'libmp3lame mp3' 'pcm_s16le wav' 'pcm_s24le wav' 'flac
     read -r codec format <<< "$spec"
     dd if=/dev/zero bs=4096 count=8 2>/dev/null |
         "$encoder" -hide_banner -loglevel error -nostdin \
-        -f f32le -ar 48000 -ac 2 -i pipe:0 -c:a "$codec" -f "$format" "$work/test-$codec"
+        -f f32le -ar 48000 -ac 2 -i pipe:0 -c:a "$codec" -f "$format" fd: > "$work/test-$codec"
     test -s "$work/test-$codec"
 done
 
@@ -130,10 +120,10 @@ cp "$work/ffmpeg-$ffmpeg/COPYING.LGPLv3" "$licenses/FFmpeg-LGPLv3.txt"
 cp "$work/ffmpeg-$ffmpeg/COPYING.GPLv3" "$licenses/FFmpeg-GPLv3.txt"
 cp "$work/lame-$lame/COPYING" "$licenses/LAME.txt"
 cp "$work/opus-$opus/COPYING" "$licenses/Opus.txt"
-cp "$work/openssl-$openssl/LICENSE.txt" "$licenses/OpenSSL.txt"
+cp "$root/LICENSE" "$licenses/Motessandare-MIT.txt"
 cat > "$licenses/README.txt" <<'NOTICE'
 Mötessändare använder FFmpeg som ett separat program.
-FFmpeg är byggt med LAME, Opus och OpenSSL.
+FFmpeg är byggt med LAME och Opus.
 Källkod och byggskript följer med i ffmpeg-macos-arm64-source.tar.
 NOTICE
 
@@ -170,7 +160,7 @@ codesign --verify --deep --strict "$app"
 mkdir -p "$work/source/scripts"
 cp "$root/scripts/package-macos.sh" "$work/source/scripts/"
 cp "$source_dir/opus-$opus.tar.gz" "$source_dir/lame-$lame.tar.gz" \
-    "$source_dir/openssl-$openssl.tar.gz" "$source_dir/ffmpeg-$ffmpeg.tar.xz" "$work/source/"
+    "$source_dir/ffmpeg-$ffmpeg.tar.xz" "$work/source/"
 cat > "$work/source/README.txt" <<'README'
 På en Mac med Apple Silicon, Xcode Command Line Tools och pkg-config:
 FFMPEG_SOURCE_DIR="$PWD" OUTPUT_DIR="$PWD" bash scripts/package-macos.sh --ffmpeg-only

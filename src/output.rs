@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use curl::easy::{Easy, HttpVersion, List, ReadError};
 use url::Url;
 
 use crate::{Destination, Recording, engine::BLOCK_DURATION};
@@ -25,8 +27,9 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(12);
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(8);
 // FFmpeg can stop reading stdin while it waits for the Icecast handshake.
 // Keep the mixer's audio in order for as long as we allow a blocked write.
-const STREAM_QUEUE_BLOCKS: usize =
-    STALL_TIMEOUT.as_millis().div_ceil(BLOCK_DURATION.as_millis()) as usize;
+const STREAM_QUEUE_BLOCKS: usize = STALL_TIMEOUT
+    .as_millis()
+    .div_ceil(BLOCK_DURATION.as_millis()) as usize;
 
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -76,9 +79,9 @@ impl Output {
         target: &StreamTarget,
         tls: bool,
     ) -> Result<Self, &'static str> {
-        let command = stream_command(dest, channels, target, tls)?;
+        let (command, upload) = stream_command(dest, channels, target, tls)?;
         Ok(Self::start(STREAM_QUEUE_BLOCKS, move |receiver, state| {
-            run_stream(command, receiver, &state);
+            run_stream(command, upload, channels, receiver, &state);
         }))
     }
 
@@ -210,10 +213,10 @@ fn ffmpeg(channels: u16) -> Command {
         .args([
             "-hide_banner",
             "-loglevel",
-            "error",
+            "quiet",
             "-nostdin",
             "-progress",
-            "pipe:1",
+            "pipe:2",
             "-f",
             "f32le",
             "-probesize",
@@ -231,8 +234,7 @@ fn ffmpeg(channels: u16) -> Command {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // FFmpeg includes connection credentials in its diagnostics.
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -297,14 +299,12 @@ fn stream_command(
     channels: u16,
     target: &StreamTarget,
     tls: bool,
-) -> Result<Command, &'static str> {
-    let StreamTarget { host, port, mount } = target;
+) -> Result<(Command, StreamUpload), &'static str> {
     let user = dest.user.trim();
     if let Some(reason) = username_hint(user) {
         return Err(reason);
     }
     let user = if user.is_empty() { "source" } else { user };
-    let endpoint = format!("icecast://{user}@{host}:{port}{mount}");
     let (encoder, muxer, content_type) = match dest.codec.as_str() {
         "Opus" => ("libopus", "ogg", "application/ogg"),
         "MP3" => ("libmp3lame", "mp3", "audio/mpeg"),
@@ -323,23 +323,110 @@ fn stream_command(
         muxer,
         "-flush_packets",
         "1",
-        "-rw_timeout",
-        "8000000",
-        "-tls",
-        if tls { "1" } else { "0" },
-        "-content_type",
-        content_type,
-        "-password",
-        &dest.password,
-        &endpoint,
+        "pipe:1",
     ]);
-    Ok(command)
+    Ok((
+        command,
+        StreamUpload {
+            url: format!("{}{}", target.server_url(tls), target.mount()),
+            authorization: format!(
+                "Authorization: Basic {}",
+                STANDARD.encode(format!("{user}:{}", dest.password))
+            ),
+            content_type,
+        },
+    ))
 }
 
-fn run_stream(mut command: Command, mut receiver: Receiver<Vec<f32>>, state: &State) {
+struct StreamUpload {
+    url: String,
+    authorization: String,
+    content_type: &'static str,
+}
+
+impl StreamUpload {
+    fn send(
+        &self,
+        mut audio: impl Read,
+        state: &State,
+        progress: &EncodeProgress,
+    ) -> Result<(), String> {
+        let mut http = Easy::new();
+        let result = (|| -> Result<(), curl::Error> {
+            http.url(&self.url)?;
+            http.follow_location(false)?;
+            http.ssl_verify_peer(true)?;
+            http.ssl_verify_host(true)?;
+            http.http_version(HttpVersion::V11)?;
+            http.upload(true)?;
+            http.fail_on_error(true)?;
+            http.connect_timeout(Duration::from_secs(8))?;
+            http.low_speed_limit(1)?;
+            http.low_speed_time(STALL_TIMEOUT)?;
+            http.progress(true)?;
+            let mut headers = List::new();
+            // Scope credentials to the origin request. A proxy challenge during
+            // CONNECT must have no origin credentials available for negotiation.
+            http.proxy_headers(List::new())?;
+            headers.append(&self.authorization)?;
+            headers.append(&format!("Content-Type: {}", self.content_type))?;
+            // Icecast 2.4 expects raw audio after the PUT handshake.
+            headers.append("Transfer-Encoding:")?;
+            headers.append("Expect: 100-continue")?;
+            headers.append("Ice-Public: 0")?;
+            http.http_headers(headers)?;
+            let mut transfer = http.transfer();
+            transfer.read_function(|buf| audio.read(buf).map_err(|_| ReadError::Abort))?;
+            transfer.write_function(|body| Ok(body.len()))?;
+            transfer.progress_function(|_, _, _, sent| {
+                if sent > 0.0 {
+                    progress.sending.store(true, Relaxed);
+                }
+                !state.stop.load(Relaxed) && !progress.cancel.load(Relaxed)
+            })?;
+            transfer.perform()
+        })();
+        if state.stop.load(Relaxed) {
+            return Ok(());
+        }
+        if result
+            .as_ref()
+            .is_err_and(|err| err.is_peer_failed_verification())
+        {
+            return Err("Serverns TLS-certifikat kunde inte verifieras. Kontrollera serveradress och certifikat.".into());
+        }
+        match http.response_code().unwrap_or_default() {
+            401 | 403 => {
+                Err("Icecast nekade inloggningen. Kontrollera användarnamn och lösenord.".into())
+            }
+            300..=399 => Err(
+                "Icecast omdirigerade sändningen. Ange destinationens slutliga serveradress."
+                    .into(),
+            ),
+            _ => Err(
+                "Anslutningen till Icecast bröts. Kontrollera nätverket och destinationen.".into(),
+            ),
+        }
+    }
+}
+
+fn run_stream(
+    mut command: Command,
+    upload: StreamUpload,
+    channels: u16,
+    mut receiver: Receiver<Vec<f32>>,
+    state: &State,
+) {
     state.set_status("Ansluter…");
     while !state.stop.load(Relaxed) {
-        let (returned, result) = encode(&mut command, receiver, state, "Sänder", true);
+        let (returned, result) = encode(
+            &mut command,
+            receiver,
+            state,
+            "Sänder",
+            Some(&upload),
+            channels,
+        );
         receiver = returned;
         if state.stop.load(Relaxed) {
             return;
@@ -385,7 +472,7 @@ fn run_record(
             return;
         }
     };
-    let path = match reserve_recording_path(
+    let (path, file) = match reserve_recording_path(
         Path::new(&settings.folder),
         &settings.filename_format,
         name,
@@ -401,8 +488,18 @@ fn run_record(
             return;
         }
     };
+    let identity = match file.try_clone().and_then(same_file::Handle::from_file) {
+        Ok(handle) => handle,
+        Err(err) => {
+            state.set_problem(format!(
+                "Kunde inte kontrollera inspelningsfilen. {}",
+                crate::feedback::file_hint(&err)
+            ));
+            return;
+        }
+    };
     let mut command = ffmpeg(channels);
-    command.args(["-y", "-c:a", encoder]);
+    command.args(["-c:a", encoder]);
     if format == "FLAC" {
         command.args(["-sample_fmt", if quality >= 24 { "s32" } else { "s16" }]);
     }
@@ -412,26 +509,34 @@ fn run_record(
     if format == "WAV" {
         command.args(["-rf64", "auto"]);
     }
-    command.args(["-f", muxer]).arg(&path);
+    // The encoder inherits the exclusively created, seekable file. A later rename
+    // or replacement of the directory entry cannot redirect its writes.
+    command.args(["-f", muxer, "fd:"]).stdout(file);
     let filename = path.file_name().unwrap().to_string_lossy();
     let (_, result) = encode(
         &mut command,
         receiver,
         state,
         &format!("Spelar in · {filename}"),
-        false,
+        None,
+        channels,
     );
-    match result {
+    match result.and_then(|_| verify_recording_path(&path, &identity)) {
         Ok(()) => {
             state.set_status(format!("Sparad · {filename}"));
             *state.saved_file.lock().unwrap() = Some(path);
         }
         Err(error) => {
-            if fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0) {
-                let _ = fs::remove_file(&path);
-            }
             state.set_problem(format!("{error} Filnamn: {filename}"));
         }
+    }
+}
+
+fn verify_recording_path(path: &Path, identity: &same_file::Handle) -> Result<(), String> {
+    if same_file::Handle::from_path(path).is_ok_and(|current| &current == identity) {
+        Ok(())
+    } else {
+        Err("Inspelningsfilen har flyttats, ersatts eller blivit otillgänglig. Kontrollera inspelningsmappen.".into())
     }
 }
 
@@ -490,37 +595,13 @@ fn local_now() -> LocalDateTime {
     }
     #[cfg(unix)]
     {
-        #[repr(C)]
-        struct Tm {
-            tm_sec: i32,
-            tm_min: i32,
-            tm_hour: i32,
-            tm_mday: i32,
-            tm_mon: i32,
-            tm_year: i32,
-            tm_wday: i32,
-            tm_yday: i32,
-            tm_isdst: i32,
-            _pad: [usize; 8],
-        }
-        unsafe extern "C" {
-            fn localtime_r(timep: *const isize, result: *mut Tm) -> *mut Tm;
-        }
-        let t = unix as isize;
-        let mut tm = Tm {
-            tm_sec: 0,
-            tm_min: 0,
-            tm_hour: 0,
-            tm_mday: 0,
-            tm_mon: 0,
-            tm_year: 0,
-            tm_wday: 0,
-            tm_yday: 0,
-            tm_isdst: 0,
-            _pad: [0; 8],
-        };
-        let ptr = unsafe { localtime_r(&t, &mut tm) };
-        if !ptr.is_null() {
+        let t = libc::time_t::try_from(unix).ok();
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+        if let Some(t) = t
+            // localtime_r initializes the platform's struct tm on success.
+            && !unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) }.is_null()
+        {
+            let tm = unsafe { tm.assume_init() };
             return LocalDateTime {
                 year: tm.tm_year + 1900,
                 month: (tm.tm_mon + 1).max(1) as u32,
@@ -643,7 +724,7 @@ fn reserve_recording_path(
     filename_format: &str,
     name: &str,
     extension: &str,
-) -> io::Result<PathBuf> {
+) -> io::Result<(PathBuf, fs::File)> {
     let folder = if folder.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -659,8 +740,12 @@ fn reserve_recording_path(
             format!("{stem}-{}.{extension}", suffix + 1)
         };
         let path = folder.join(filename);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(path),
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -673,7 +758,8 @@ fn encode(
     receiver: Receiver<Vec<f32>>,
     state: &State,
     active_status: &str,
-    network: bool,
+    upload: Option<&StreamUpload>,
+    channels: u16,
 ) -> (Receiver<Vec<f32>>, Result<(), String>) {
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -691,33 +777,41 @@ fn encode(
         }
     };
     let mut stdin = child.stdin.take().expect("FFmpeg stdin is piped");
-    let stdout = child.stdout.take().expect("FFmpeg stdout is piped");
-    let progress = AtomicI64::new(0);
-    let cancel = AtomicBool::new(false);
-    let writing = AtomicBool::new(false);
+    let stderr = child.stderr.take().expect("FFmpeg progress pipe");
+    let progress = EncodeProgress::default();
 
     thread::scope(|scope| {
+        let sender = upload.map(|upload| {
+            let audio = child.stdout.take().expect("FFmpeg audio pipe");
+            let progress = &progress;
+            scope.spawn(move || upload.send(audio, state, progress))
+        });
         let progress_reader = scope.spawn(|| {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if let Some(time) = line
                     .strip_prefix("out_time_us=")
                     .and_then(|time| time.parse::<i64>().ok())
                     .filter(|time| *time > 0)
                 {
-                    progress.fetch_max(time, Relaxed);
+                    progress.encoded.fetch_max(time, Relaxed);
                 }
             }
         });
         let writer = {
-            let cancel = &cancel;
-            let writing = &writing;
+            let cancel = &progress.cancel;
+            let writing = &progress.writing;
             scope.spawn(move || {
                 let mut bytes = Vec::new();
+                let mut samples_written = 0u64;
+                let mut drained = false;
                 while !cancel.load(Relaxed) {
                     let pcm = match receiver.recv_timeout(POLL) {
                         Ok(pcm) => pcm,
                         Err(RecvTimeoutError::Timeout) => continue,
-                        Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            drained = true;
+                            break;
+                        }
                     };
                     bytes.clear();
                     bytes.extend(pcm.iter().flat_map(|sample| sample.to_le_bytes()));
@@ -727,43 +821,63 @@ fn encode(
                     if result.is_err() {
                         break;
                     }
+                    samples_written += pcm.len() as u64;
                 }
                 drop(stdin);
-                receiver
+                (receiver, samples_written, drained)
             })
         };
 
-        let result = monitor(
-            &mut child,
-            state,
-            active_status,
-            network,
-            &progress,
-            &writing,
-        );
-        cancel.store(true, Relaxed);
+        let result = monitor(&mut child, state, active_status, sender.as_ref(), &progress);
+        progress.cancel.store(true, Relaxed);
         if child.try_wait().ok().flatten().is_none() {
             let _ = child.kill();
             let _ = child.wait();
         }
         let _ = progress_reader.join();
-        state.encoded_us.store(progress.load(Relaxed), Relaxed);
-        (writer.join().expect("FFmpeg writer panicked"), result)
+        let (receiver, samples_written, drained) = writer.join().expect("FFmpeg writer panicked");
+        let result = if let Some(sender) = sender {
+            let sent = sender.join().expect("Icecast uploader panicked");
+            result.and(sent)
+        } else if result.is_ok() && !drained {
+            Err("FFmpeg avslutades innan allt inspelningsljud hade skrivits.".into())
+        } else {
+            // Some FFmpeg versions report the start timestamp of the last packet.
+            // Once the trailer is written we know the exact duration from the PCM.
+            if result.is_ok() {
+                let frames = samples_written / u64::from(channels);
+                state
+                    .encoded_us
+                    .store((u128::from(frames) * 1_000_000 / 48_000) as i64, Relaxed);
+            }
+            result
+        };
+        (receiver, result)
     })
+}
+
+#[derive(Default)]
+struct EncodeProgress {
+    encoded: AtomicI64,
+    sending: AtomicBool,
+    writing: AtomicBool,
+    cancel: AtomicBool,
 }
 
 fn monitor(
     child: &mut std::process::Child,
     state: &State,
     active_status: &str,
-    network: bool,
-    progress: &AtomicI64,
-    writing: &AtomicBool,
+    sender: Option<&thread::ScopedJoinHandle<'_, Result<(), String>>>,
+    progress: &EncodeProgress,
 ) -> Result<(), String> {
     let mut last_progress = 0;
     let mut stalled_since = None;
     let mut stopping_since = None;
     loop {
+        if sender.is_some_and(|sender| sender.is_finished()) {
+            return Ok(());
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|_| "Kontakten med ljudprogrammet FFmpeg bröts.")?
@@ -771,14 +885,14 @@ fn monitor(
             if status.success() {
                 return Ok(());
             }
-            return Err(if network {
+            return Err(if sender.is_some() {
                 "Ljudet kunde inte skickas till Icecast. Kontrollera nätverket, serveradressen och inloggningsuppgifterna."
             } else {
                 "Ljudet kunde inte skrivas till filen. Kontrollera ledigt utrymme och att du får skriva i inspelningsmappen."
             }.into());
         }
         if state.stop.load(Relaxed) {
-            if network {
+            if sender.is_some() {
                 return Ok(());
             }
             if stopping_since.is_none() {
@@ -788,7 +902,11 @@ fn monitor(
                 return Err("Det tog för lång tid att spara klart. Kontrollera om filen i inspelningsmappen går att spela upp.".into());
             }
         }
-        let current_progress = progress.load(Relaxed);
+        let current_progress = if sender.is_none() || progress.sending.load(Relaxed) {
+            progress.encoded.load(Relaxed)
+        } else {
+            0
+        };
         if current_progress != last_progress {
             if last_progress == 0 && stopping_since.is_none() {
                 state.set_status(active_status);
@@ -797,7 +915,7 @@ fn monitor(
             last_progress = current_progress;
             stalled_since = None;
         }
-        if writing.load(Relaxed) {
+        if progress.writing.load(Relaxed) {
             if stalled_since.get_or_insert_with(Instant::now).elapsed() > STALL_TIMEOUT {
                 return Err("Ljudprogrammet FFmpeg har slutat ta emot ljud.".into());
             }

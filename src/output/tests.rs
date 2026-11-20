@@ -76,6 +76,13 @@ fn stream_receiver(
                 .get_mut()
                 .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
                 .unwrap();
+            if content_type == "audio/mpeg" {
+                // Icecast 2.4 also sends its final response before the upload ends.
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.0 200 OK\r\n\r\n")
+                    .unwrap();
+            }
             let mut first_bytes = vec![0; magic.len()];
             stream.read_exact(&mut first_bytes).unwrap();
             assert_eq!(first_bytes, magic);
@@ -164,7 +171,10 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
         assert!(!recording.encoded_time().is_zero());
         let path = recording.recording_result().unwrap();
         assert!(paths.contains(&path));
-        assert_eq!(path.extension().unwrap(), format.to_ascii_lowercase().as_str());
+        assert_eq!(
+            path.extension().unwrap(),
+            format.to_ascii_lowercase().as_str()
+        );
     }
     for (index, (format, _)) in formats.iter().enumerate() {
         let extension = format.to_ascii_lowercase();
@@ -212,7 +222,12 @@ fn slow_icecast_handshake_preserves_startup_audio() {
     let mut connection = connections
         .recv_timeout(Duration::from_secs(5))
         .unwrap_or_else(|err| panic!("{err}: {:?}", output.status()));
-    assert_eq!(output.state.dropped.load(Relaxed), 0, "{:?}", output.status());
+    assert_eq!(
+        output.state.dropped.load(Relaxed),
+        0,
+        "{:?}",
+        output.status()
+    );
     // Decode the first two seconds the server actually received (96 kbit/s).
     let mut mp3 = vec![0; 2 * 96_000 / 8];
     mp3[..3].copy_from_slice(b"ID3");
@@ -237,7 +252,9 @@ fn full_output_queue_reports_audio_loss_and_preserves_accepted_blocks_on_stop() 
     let (drained, result) = mpsc::channel();
     let mut output = Output::start(2, move |receiver, _| {
         if paused.recv().is_ok() {
-            drained.send(receiver.into_iter().collect::<Vec<_>>()).unwrap();
+            drained
+                .send(receiver.into_iter().collect::<Vec<_>>())
+                .unwrap();
         }
     });
 
@@ -257,7 +274,7 @@ fn full_output_queue_reports_audio_loss_and_preserves_accepted_blocks_on_stop() 
 }
 
 #[test]
-fn https_stream_uses_tls_default_port_and_separate_password_argument() {
+fn https_upload_uses_the_selected_origin_and_keeps_credentials_out_of_ffmpeg() {
     let destination = Destination {
         server: "https://[::1]/unused".into(),
         mount: "/Möte live.opus".into(),
@@ -266,13 +283,77 @@ fn https_stream_uses_tls_default_port_and_separate_password_argument() {
         ..Default::default()
     };
     let (target, tls) = StreamTarget::parse(&destination).unwrap();
-    let command = stream_command(&destination, 1, &target, tls).unwrap();
-    let args: Vec<_> = command.get_args().map(|arg| arg.to_str().unwrap()).collect();
-    assert!(args.windows(2).any(|pair| pair == ["-tls", "1"]));
-    assert!(args.windows(2).any(|pair| pair == ["-password", "test @:/?%"]));
+    let (command, upload) = stream_command(&destination, 1, &target, tls).unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert_eq!(upload.url, "https://[::1]:443/M%C3%B6te%20live.opus");
+    let token = STANDARD.encode(format!("source:{}", destination.password));
     assert_eq!(
-        args.last(),
-        Some(&"icecast://source@[::1]:443/M%C3%B6te%20live.opus")
+        upload.authorization,
+        format!("Authorization: Basic {token}")
+    );
+    assert!(
+        args.iter()
+            .all(|arg| !arg.contains("test @:/?%") && !arg.contains(&token))
+    );
+    assert_eq!(args.last(), Some(&"pipe:1"));
+}
+
+#[test]
+#[ignore = "requires local TCP access"]
+fn upload_returns_redirect_to_operator_without_contacting_the_new_origin() {
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dest = Destination {
+        server: format!("http://{}", server.local_addr().unwrap()),
+        password: "test-only".into(),
+        ..Destination::default()
+    };
+    let location = other.local_addr().unwrap();
+    let (target, tls) = StreamTarget::parse(&dest).unwrap();
+    let (_, upload) = stream_command(&dest, 1, &target, tls).unwrap();
+    let output = Output::start(1, |_, _| {});
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = upload.send(io::empty(), &output.state, &EncodeProgress::default());
+        let _ = tx.send(result);
+    });
+    server.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match server.accept() {
+            Ok((socket, _)) => break BufReader::new(socket),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(POLL)
+            }
+            Err(e) => panic!("test server: {e}"),
+        }
+    };
+    stream
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(stream.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    write!(stream.get_mut(), "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{location}/other\r\nContent-Length: 0\r\n\r\n").unwrap();
+    assert!(
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err()
+            .contains("omdirigerade")
+    );
+    other.set_nonblocking(true).unwrap();
+    assert_eq!(
+        other.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
     );
 }
 
@@ -320,9 +401,9 @@ fn reserve_recording_path_avoids_overwriting_existing_files() {
     let first = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
     let second = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
     let third = reserve_recording_path(folder.path(), "mote-{namn}", "Sal 1", "flac").unwrap();
-    assert_eq!(first.file_name().unwrap(), "mote-Sal-1.flac");
-    assert_eq!(second.file_name().unwrap(), "mote-Sal-1-2.flac");
-    assert_eq!(third.file_name().unwrap(), "mote-Sal-1-3.flac");
+    assert_eq!(first.0.file_name().unwrap(), "mote-Sal-1.flac");
+    assert_eq!(second.0.file_name().unwrap(), "mote-Sal-1-2.flac");
+    assert_eq!(third.0.file_name().unwrap(), "mote-Sal-1-3.flac");
 }
 
 #[test]
@@ -345,6 +426,22 @@ fn reports_recording_folder_failure_without_returning_a_saved_path() {
             .starts_with("Kunde inte skapa inspelningsfilen i ")
     );
     assert_eq!(fs::read(file).unwrap(), b"existing content");
+}
+
+#[test]
+fn recording_keeps_writing_the_open_file_if_its_name_is_reused() {
+    let folder = tempfile::tempdir().unwrap();
+    let (path, mut handle) =
+        reserve_recording_path(folder.path(), "original", "Sal", "wav").unwrap();
+    let identity = same_file::Handle::from_file(handle.try_clone().unwrap()).unwrap();
+    assert!(verify_recording_path(&path, &identity).is_ok());
+    let moved = folder.path().join("flyttad.wav");
+    fs::rename(&path, &moved).unwrap();
+    fs::write(&path, b"other file").unwrap();
+    handle.write_all(b"recorded audio").unwrap();
+    assert!(verify_recording_path(&path, &identity).is_err());
+    assert_eq!(fs::read(path).unwrap(), b"other file");
+    assert_eq!(fs::read(moved).unwrap(), b"recorded audio");
 }
 
 #[test]

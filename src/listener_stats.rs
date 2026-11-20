@@ -56,24 +56,40 @@ pub enum MountStatus<'a> {
 }
 
 impl ListenerStats {
-    pub fn update(&mut self, ctx: &Context, servers: HashSet<&str>, refresh: bool) {
+    pub fn update<'a>(
+        &mut self,
+        ctx: &Context,
+        targets: impl Iterator<Item = &'a StatsTarget>,
+        refresh: bool,
+    ) {
+        let mut servers: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for target in targets {
+            servers
+                .entry(&target.server)
+                .or_default()
+                .insert(&target.mount);
+        }
         self.servers
-            .retain(|server, _| servers.contains(server.as_str()));
-        self.history
-            .retain(|(server, _), _| servers.contains(server.as_str()));
+            .retain(|server, _| servers.contains_key(server.as_str()));
+        self.history.retain(|(server, mount), _| {
+            servers
+                .get(server.as_str())
+                .is_some_and(|wanted| wanted.contains(mount.as_str()))
+        });
         let now = Instant::now();
-        for server in servers {
+        for (server, wanted) in servers {
             let stats = self.servers.entry(server.to_owned()).or_default();
             if let Some(pending) = &stats.pending {
-                let received = match pending.try_recv() {
+                let mut received = match pending.try_recv() {
                     Ok(result) => result,
                     Err(TryRecvError::Empty) => continue,
                     Err(TryRecvError::Disconnected) => {
                         Err("Hämtningen avbröts. Välj Uppdatera för att försöka igen.".into())
                     }
                 };
-                if let Ok(mounts) = &received {
-                    for (mount, counts) in mounts {
+                if let Ok(mounts) = &mut received {
+                    mounts.retain(|mount, _| wanted.contains(mount.as_str()));
+                    for (mount, counts) in mounts.iter() {
                         if let Some(current) = counts.current {
                             let samples = self
                                 .history
@@ -218,11 +234,15 @@ impl ConnectionTester {
     }
 }
 
-fn probe_server(server: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
+fn public_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| "Kunde inte starta HTTP-klienten".to_owned())?;
+}
+
+fn probe_server(server: &str) -> Result<String, String> {
+    let client = public_client().map_err(|_| "Kunde inte starta HTTP-klienten".to_owned())?;
     let started = Instant::now();
     let status_url = format!("{server}/status-json.xsl");
     let response = client.get(&status_url).send().map_err(|error| {
@@ -240,7 +260,12 @@ fn probe_server(server: &str) -> Result<String, String> {
         if let Ok(parsed) = serde_json::from_slice::<ProbeResponse>(&body)
             && let Some(server_id) = parsed.icestats.server_id.filter(|s| !s.trim().is_empty())
         {
-            return Ok(format!("{server_id} nåddes ({latency_ms} ms)"));
+            let name: String = server_id
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect();
+            return Ok(format!("{name} nåddes ({latency_ms} ms)"));
         }
         return Ok(format!("Servern nåddes ({latency_ms} ms)"));
     }
@@ -264,9 +289,7 @@ struct ProbeIceStats {
 }
 
 fn fetch(url: &str) -> ServerResult {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
+    let client = public_client()
         .map_err(|_| "Appen kunde inte öppna en nätverksanslutning för att hämta statistiken.")?;
     let response = client.get(url).send().map_err(|error| {
         if error.is_timeout() {
@@ -446,22 +469,21 @@ mod tests {
                 next_refresh: Some(Instant::now() + REFRESH_INTERVAL),
             },
         );
-        let servers = HashSet::from([target.server.as_str()]);
         let ctx = Context::default();
-        stats.update(&ctx, servers.clone(), true);
+        stats.update(&ctx, std::iter::once(&target), true);
         assert!(stats.refreshing());
         assert!(
             matches!(stats.status(&target), MountStatus::Listed(counts) if counts.current == Some(4))
         );
 
         sender.send(Err("Serverfel".into())).unwrap();
-        stats.update(&ctx, servers, false);
+        stats.update(&ctx, std::iter::once(&target), false);
         assert!(!stats.refreshing());
         assert!(matches!(
             stats.status(&target),
             MountStatus::Unavailable("Serverfel")
         ));
-        stats.update(&ctx, HashSet::new(), false);
+        stats.update(&ctx, std::iter::empty(), false);
         assert!(matches!(stats.status(&target), MountStatus::Loading));
     }
 
@@ -482,6 +504,53 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn history_only_keeps_configured_mounts_across_refreshes() {
+        let target = StatsTarget {
+            server: "http://localhost".into(),
+            mount: "/live".into(),
+        };
+        let mut stats = ListenerStats::default();
+        let ctx = Context::default();
+        for i in 0..MAX_HISTORY_SAMPLES + 3 {
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ok(HashMap::from([
+                (
+                    target.mount.clone(),
+                    ListenerCounts {
+                        current: Some(i as u64),
+                        peak: None,
+                    },
+                ),
+                (
+                    format!("/other-{i}"),
+                    ListenerCounts {
+                        current: Some(1),
+                        peak: None,
+                    },
+                ),
+            ])))
+            .unwrap();
+            stats.servers.insert(
+                target.server.clone(),
+                ServerStats {
+                    pending: Some(rx),
+                    result: None,
+                    next_refresh: Some(Instant::now() + REFRESH_INTERVAL),
+                },
+            );
+            stats.update(&ctx, std::iter::once(&target), false);
+        }
+        assert_eq!(stats.history.len(), 1);
+        assert_eq!(stats.history(&target).unwrap().len(), MAX_HISTORY_SAMPLES);
+        let other = StatsTarget {
+            server: target.server.clone(),
+            mount: "/new".into(),
+        };
+        stats.update(&ctx, std::iter::once(&other), false);
+        assert!(stats.history.is_empty());
     }
 
     #[test]

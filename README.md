@@ -17,11 +17,17 @@ När du stoppar en inspelning och filen är färdigskriven kan du byta namn på 
 
 ## Kör från källkod
 
-Installera Rust med Cargo och en FFmpeg-version med stöd för Icecast, libopus och libmp3lame. Appen kan använda FFmpeg från din `PATH` eller från samma katalog som den byggda programfilen. På Windows heter filen `ffmpeg.exe`.
+Installera Rust med Cargo och FFmpeg med stöd för libopus, libmp3lame och protokollen `pipe` och `fd` (testat med FFmpeg 6.1 och senare). Appen kan använda FFmpeg från din `PATH` eller från samma katalog som den byggda programfilen. På Windows heter filen `ffmpeg.exe`. Linuxbygget behöver utvecklingspaketen för ALSA, OpenSSL och D-Bus.
 
 ```sh
 cargo run --locked --release
 ```
+
+## Sändningslösenord
+
+Ange lösenordet i destinationens lösenordsfält och använd HTTPS för att kryptera ljud och inloggning under överföringen. Appen verifierar serverns certifikat och värdnamn. För HTTP-destinationer skickas ljud och inloggning i klartext. Ange serverns slutliga adress om den tidigare adressen har börjat omdirigera.
+
+På macOS lagras lösenorden i Nyckelringen. På Linux används skrivbordets Secret Service, till exempel GNOME Keyring. På Windows skyddas lösenorden i inställningsfilen med användarkontots DPAPI. Äldre inställningar migreras när de öppnas. Om lösenordsförvaringen är låst behöver den låsas upp för att slutföra migreringen. Vid flytt till en annan dator behöver även lösenordsförvaringen återställas eller destinationernas lösenord anges på nytt. Äldre säkerhetskopior kan fortfarande innehålla klartextlösenord.
 
 ## Testa
 
@@ -29,7 +35,7 @@ cargo run --locked --release
 cargo test --locked
 ```
 
-För att även testa inspelning i fyra format och återanslutning mot en lokal testserver, kör `cargo test --locked -- --include-ignored`. Det kräver FFmpeg och tillgång till lokala TCP-anslutningar.
+För att även testa inspelning i fyra format, återanslutning och omdirigering mot lokala testservrar samt systemets lösenordsförvaring, kör `cargo test --locked -- --include-ignored`. Det kräver FFmpeg, lokala TCP-anslutningar och en tillgänglig lösenordsförvaring. Lösenordstestet använder tillfälliga testuppgifter.
 
 ## Paketera för macOS
 

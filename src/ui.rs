@@ -586,17 +586,30 @@ impl Ui {
             return;
         };
         match toast.item {
-            UndoItem::Source { index, source } => {
+            UndoItem::Source { index, mut source } => {
+                if self.settings.sources.iter().any(|s| s.id == source.id) {
+                    source.id = self.settings.next_source_id();
+                }
                 let pos = index.min(self.settings.sources.len());
                 let id = source.id;
                 self.settings.sources.insert(pos, source);
-                self.selected_source = Some(id);
+                if self.view != View::SourceSettings {
+                    self.selected_source = Some(id);
+                }
             }
             UndoItem::Destination {
                 index,
-                destination,
+                mut destination,
                 linked_sources,
             } => {
+                if self
+                    .settings
+                    .destinations
+                    .iter()
+                    .any(|d| d.id == destination.id)
+                {
+                    destination.id = self.settings.next_destination_id();
+                }
                 let dest_id = destination.id;
                 let pos = index.min(self.settings.destinations.len());
                 self.settings.destinations.insert(pos, destination);
@@ -632,11 +645,11 @@ impl Ui {
             .iter()
             .map(StatsTarget::parse)
             .collect();
-        let servers: HashSet<_> = targets
-            .iter()
-            .filter_map(|target| target.as_ref().ok().map(|target| target.server.as_str()))
-            .collect();
-        self.listener_stats.update(ctx, servers, force_refresh);
+        self.listener_stats.update(
+            ctx,
+            targets.iter().filter_map(|target| target.as_ref().ok()),
+            force_refresh,
+        );
         targets
     }
 
@@ -1349,6 +1362,23 @@ impl Ui {
         }
     }
 
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        if self.load_error.is_some()
+            || self.confirm_stop.is_some()
+            || !self.saved_recordings.is_empty()
+        {
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT)) && self.save_state.dirty()
+        {
+            self.hidden_settings_error = None;
+            self.save();
+        }
+        if ctx.input_mut(|input| input.consume_shortcut(&NEW_SOURCE_SHORTCUT)) {
+            self.add_source();
+        }
+    }
+
     fn repaint_interval(&self) -> Duration {
         let active = self.settings.sources.iter().any(|source| {
             self.engine.present(source.id)
@@ -1992,17 +2022,7 @@ impl eframe::App for Ui {
         let closing = ctx.input(|input| input.viewport().close_requested());
         if !closing {
             self.collect_recordings();
-        }
-        if self.load_error.is_none() {
-            if ctx.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
-                && self.save_state.dirty()
-            {
-                self.hidden_settings_error = None;
-                self.save();
-            }
-            if ctx.input_mut(|input| input.consume_shortcut(&NEW_SOURCE_SHORTCUT)) {
-                self.add_source();
-            }
+            self.handle_shortcuts(ctx);
         }
 
         egui::TopBottomPanel::top("header")
@@ -2709,10 +2729,10 @@ impl eframe::App for Ui {
         }
         if self.confirm_stop.is_some() {
             self.stop_confirm_modal(ctx, palette);
-        } else if let Some(recording) = self.saved_recordings.front_mut()
-            && recording.show(ctx)
-        {
-            self.saved_recordings.pop_front();
+        } else if let Some(recording) = self.saved_recordings.front_mut() {
+            if recording.show(ctx) {
+                self.saved_recordings.pop_front();
+            }
         } else {
             self.undo_toast_overlay(ctx, palette);
         }
@@ -2779,10 +2799,6 @@ fn listener_stats_page(
     stats: &mut ListenerStats,
 ) {
     let targets: Vec<_> = destinations.iter().map(StatsTarget::parse).collect();
-    let servers: std::collections::HashSet<_> = targets
-        .iter()
-        .filter_map(|target| target.as_ref().ok().map(|target| target.server.as_str()))
-        .collect();
     let refresh = ui
         .horizontal(|ui| {
             ui.label(strong_text("Lyssnarstatistik", 18.0, palette.text_primary));
@@ -2791,7 +2807,7 @@ fn listener_stats_page(
                 let clicked = text_button(
                     ui,
                     "Uppdatera",
-                    !servers.is_empty() && !refreshing,
+                    targets.iter().any(Result::is_ok) && !refreshing,
                     ButtonVariant::Neutral,
                     palette,
                 )
@@ -2804,7 +2820,11 @@ fn listener_stats_page(
             .inner
         })
         .inner;
-    stats.update(ui.ctx(), servers, refresh);
+    stats.update(
+        ui.ctx(),
+        targets.iter().filter_map(|target| target.as_ref().ok()),
+        refresh,
+    );
 
     if destinations.is_empty() {
         ui.add_space(SPACE_M);
@@ -3504,7 +3524,8 @@ fn dismissible_dot_pill(
                             ui.spacing_mut().item_spacing.x = 5.0;
                             let (dot_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(7.0, 14.0), Sense::hover());
-                            ui.painter().circle_filled(dot_rect.center(), 3.2, dot_color);
+                            ui.painter()
+                                .circle_filled(dot_rect.center(), 3.2, dot_color);
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(message).size(FONT_CAPTION).color(fg),
@@ -3526,14 +3547,13 @@ fn source_status_notices(
     ui: &mut EguiUi,
     engine: &Engine,
     source: &Source,
-    present: bool,
     streaming: bool,
     recording: bool,
     live: &crate::engine::LiveStatus,
     palette: Palette,
 ) {
     let source_id = egui::Id::new(("source-feedback", source.id));
-    let input_hint = (!present).then(|| {
+    let input_hint = (!live.present).then(|| {
         let consequence = match (streaming, recording) {
             (true, true) => "Sändningen och inspelningen får tyst ljud. ",
             (true, false) => "Sändningen får tyst ljud. ",
@@ -3651,7 +3671,11 @@ fn source_status_notices(
             feedback::condition(ui, id.with("audio-gap"), None);
         }
         feedback::condition(ui, source_id.with(("input", &source.device)), None);
-        feedback::condition(ui, source_id.with(("record-gap", live.record_attempt)), None);
+        feedback::condition(
+            ui,
+            source_id.with(("record-gap", live.record_attempt)),
+            None,
+        );
     }
 }
 
@@ -4514,7 +4538,12 @@ fn destination_choice_label(dest: &Destination) -> String {
 }
 
 fn destination_summary(dest: &Destination) -> String {
-    let server = dest.server.trim().trim_end_matches('/');
+    let public_server = dest.server_without_secrets();
+    let server = public_server
+        .as_deref()
+        .unwrap_or(&dest.server)
+        .trim()
+        .trim_end_matches('/');
     let mount = dest.mount.trim();
     let endpoint = if mount.is_empty() {
         server.to_owned()
@@ -4588,20 +4617,34 @@ fn source_card(
     let count = resolved.len();
     let show_destinations = |ui: &mut EguiUi| {
         let total = if streaming { live.targets.len() } else { count };
-        let noun = if total == 1 { "destination" } else { "destinationer" };
+        let noun = if narrow {
+            "mål"
+        } else if total == 1 {
+            "destination"
+        } else {
+            "destinationer"
+        };
         let label = if streaming {
             format!("{}/{total} {noun}", live.connected)
         } else {
             format!("{total} {noun}")
         };
         let pill = status_pill(
-            ui, label, palette.pill_bg, palette.pill_border, palette.text_secondary,
+            ui,
+            label,
+            palette.pill_bg,
+            palette.pill_border,
+            palette.text_secondary,
         );
         if total > 0 {
             pill.on_hover_ui(|ui| {
                 if streaming {
                     for target in &live.targets {
-                        let state = if target.sending { "Ansluten" } else { "Ej ansluten" };
+                        let state = if target.sending {
+                            "Ansluten"
+                        } else {
+                            "Ej ansluten"
+                        };
                         ui.label(format!("{} · {state}", target.name));
                     }
                 } else {
@@ -4661,7 +4704,7 @@ fn source_card(
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = if compact { 4.0 } else { 6.0 };
 
-        let present = engine.present(source.id);
+        let present = live.present;
         let ready = present && !streaming && !recording;
         let show_ready = |ui: &mut EguiUi| {
             if ready {
@@ -4724,7 +4767,7 @@ fn source_card(
                 ui.horizontal_wrapped(|ui| show_activity(ui));
             }
 
-            source_status_notices(ui, engine, source, present, streaming, recording, &live, palette);
+            source_status_notices(ui, engine, source, streaming, recording, &live, palette);
 
             // Narrow stereo/mono meter strip with tiny V/H tag + dB readout
             ui.push_id(source.id, |ui| {
@@ -4971,7 +5014,7 @@ fn source_card(
                 .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
         }
 
-        source_status_notices(ui, engine, source, present, streaming, recording, &live, palette);
+        source_status_notices(ui, engine, source, streaming, recording, &live, palette);
         ui.push_id(source.id, |ui| {
             if compact {
                 compact_meter(ui, &levels[..if stereo { 2 } else { 1 }], palette);
@@ -5637,7 +5680,7 @@ fn source_settings(
                 );
                 ComboBox::from_id_salt("left")
                     .width(56.0)
-                    .selected_text((left + 1).to_string())
+                    .selected_text(left.saturating_add(1).to_string())
                     .show_ui(ui, |ui| {
                         for channel in 0..count {
                             ui.selectable_value(
@@ -5659,7 +5702,7 @@ fn source_settings(
                     let mut chosen_right = right_val;
                     ComboBox::from_id_salt("right")
                         .width(56.0)
-                        .selected_text((right_val + 1).to_string())
+                        .selected_text(right_val.saturating_add(1).to_string())
                         .show_ui(ui, |ui| {
                             for channel in (0..count).filter(|channel| *channel != source.left) {
                                 ui.selectable_value(
@@ -6334,6 +6377,30 @@ fn source_settings(
     outcome
 }
 
+fn password_visible(ctx: &Context, id: egui::Id) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| {
+        let visible = data
+            .get_temp::<u64>(id)
+            .is_some_and(|last| pass.saturating_sub(last) <= 1);
+        if visible {
+            data.insert_temp(id, pass);
+        }
+        visible
+    })
+}
+
+fn toggle_password(ctx: &Context, id: egui::Id, visible: bool) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| {
+        if visible {
+            data.remove::<u64>(id);
+        } else {
+            data.insert_temp(id, pass);
+        }
+    });
+}
+
 fn destination_settings(
     ui: &mut EguiUi,
     destination: &mut Destination,
@@ -6342,7 +6409,7 @@ fn destination_settings(
 ) -> bool {
     let mut changed = false;
     let show_id = ui.make_persistent_id("show-password");
-    let mut show_password = ui.data(|data| data.get_temp::<bool>(show_id).unwrap_or(false));
+    let show_password = password_visible(ui.ctx(), show_id);
     let single_column = narrow || ui.available_width() < 500.0;
 
     if single_column {
@@ -6403,8 +6470,7 @@ fn destination_settings(
                 )
                 .clicked()
                 {
-                    show_password = !show_password;
-                    ui.data_mut(|data| data.insert_temp(show_id, show_password));
+                    toggle_password(ui.ctx(), show_id, show_password);
                 }
             });
         });
@@ -6512,8 +6578,7 @@ fn destination_settings(
                 )
                 .clicked()
                 {
-                    show_password = !show_password;
-                    ui.data_mut(|data| data.insert_temp(show_id, show_password));
+                    toggle_password(ui.ctx(), show_id, show_password);
                 }
             });
         });
@@ -6701,16 +6766,26 @@ mod tests {
         let ctx = Context::default();
         configure_fonts(&ctx);
         let mut app = Ui::from_settings(Ok(Settings::default()), Engine::new(), None);
-        app.confirm_stop = Some(StopConfirm::Close { discard_changes: false });
+        app.confirm_stop = Some(StopConfirm::Close {
+            discard_changes: false,
+        });
         let id = egui::Id::new(("confirm-stop-modal", true));
         for width in [1200.0, 420.0] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 600.0));
             for _ in 0..2 {
-                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-                let _ = ctx.run(input, |ctx| app.stop_confirm_modal(ctx, Palette::for_theme(true)));
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    app.stop_confirm_modal(ctx, Palette::for_theme(true))
+                });
             }
             let dialog = ctx.memory(|m| m.area_rect(id)).unwrap();
-            assert!(screen.contains_rect(dialog), "{dialog:?} outside {screen:?}");
+            assert!(
+                screen.contains_rect(dialog),
+                "{dialog:?} outside {screen:?}"
+            );
         }
     }
 
@@ -6754,11 +6829,55 @@ mod tests {
             app.close_confirmed = false;
             let output = click_button(&ctx, button, |ctx| app.stop_confirm_modal(ctx, palette));
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
-            assert_eq!(commands.contains(&egui::ViewportCommand::Close), expect_close);
+            assert_eq!(
+                commands.contains(&egui::ViewportCommand::Close),
+                expect_close
+            );
             assert_eq!(app.close_confirmed, expect_close);
             assert_eq!(app.save_state.dirty(), expect_dirty);
             assert!(app.confirm_stop.is_none());
         }
+    }
+
+    #[test]
+    fn new_source_shortcut_waits_until_dialogs_close() {
+        let ctx = Context::default();
+        let mut app = Ui::from_settings(
+            Ok(Settings::default()),
+            crate::engine::tests::test_engine(),
+            None,
+        );
+        let press_shortcut = |app: &mut Ui| {
+            let input = egui::RawInput {
+                modifiers: NEW_SOURCE_SHORTCUT.modifiers,
+                events: vec![egui::Event::Key {
+                    key: NEW_SOURCE_SHORTCUT.logical_key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: NEW_SOURCE_SHORTCUT.modifiers,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.handle_shortcuts(ctx));
+        };
+
+        app.confirm_stop = Some(StopConfirm::Recordings);
+        press_shortcut(&mut app);
+        assert!(app.settings.sources.is_empty());
+
+        app.confirm_stop = None;
+        app.saved_recordings
+            .push_back(crate::recording_dialog::SavedRecording::new(
+                "Sal".into(),
+                "Möte.wav".into(),
+            ));
+        press_shortcut(&mut app);
+        assert!(app.settings.sources.is_empty());
+
+        app.saved_recordings.clear();
+        press_shortcut(&mut app);
+        assert_eq!(app.settings.sources.len(), 1);
     }
 
     #[test]
@@ -7478,12 +7597,18 @@ mod tests {
             });
         });
         assert_ne!(id_a, id_b);
-        assert!(!ctx.data(|d| d.get_temp::<bool>(id_a).unwrap_or(false)));
-        assert!(!ctx.data(|d| d.get_temp::<bool>(id_b).unwrap_or(false)));
-
-        ctx.data_mut(|d| d.insert_temp(id_a, true));
-        assert!(ctx.data(|d| d.get_temp::<bool>(id_a).unwrap_or(false)));
-        assert!(!ctx.data(|d| d.get_temp::<bool>(id_b).unwrap_or(false)));
+        let _ = ctx.run(Default::default(), |ctx| {
+            assert!(!password_visible(ctx, id_a));
+            toggle_password(ctx, id_a, false);
+        });
+        let _ = ctx.run(Default::default(), |ctx| {
+            assert!(password_visible(ctx, id_a));
+            assert!(!password_visible(ctx, id_b));
+        });
+        let _ = ctx.run(Default::default(), |_| {}); // The editor was closed.
+        let _ = ctx.run(Default::default(), |ctx| {
+            assert!(!password_visible(ctx, id_a))
+        });
     }
 
     #[test]
@@ -7515,7 +7640,7 @@ mod tests {
             destination_ids: vec![1],
             ..Source::default()
         };
-        engine.update(&[source.clone()]);
+        engine.update(std::slice::from_ref(&source));
 
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 600.0))),
@@ -7531,7 +7656,7 @@ mod tests {
                         ui,
                         &engine,
                         &source,
-                        &[dest.clone()],
+                        std::slice::from_ref(&dest),
                         false,
                         false,
                         true,
@@ -7608,6 +7733,53 @@ mod tests {
         ui.undo_delete();
         assert_eq!(ui.settings.sources.len(), 1);
         assert_eq!(ui.settings.sources[0].name, "Stora salen");
+    }
+
+    #[test]
+    fn undo_preserves_entities_created_after_the_deletion() {
+        let mut app = Ui::from_settings(
+            Ok(Settings {
+                destinations: vec![Destination {
+                    id: 1,
+                    name: "Huvudsändning".into(),
+                    ..Default::default()
+                }],
+                sources: vec![Source {
+                    id: 1,
+                    name: "Stora salen".into(),
+                    destination_ids: vec![1],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            crate::engine::tests::test_engine(),
+            None,
+        );
+
+        app.delete_destination(1);
+        app.add_destination();
+        let new_dest_id = app.settings.destinations[0].id;
+        app.settings.sources[0].destination_ids.push(new_dest_id);
+        app.undo_delete();
+        let restored_dest = &app.settings.destinations[0];
+        assert_eq!(restored_dest.name, "Huvudsändning");
+        assert_ne!(restored_dest.id, new_dest_id);
+        assert_eq!(app.settings.destinations[1].id, new_dest_id);
+        assert_eq!(
+            app.settings.sources[0].destination_ids,
+            [restored_dest.id, new_dest_id]
+        );
+
+        app.delete_source(0);
+        app.add_source();
+        let new_source_id = app.settings.sources[0].id;
+        app.new_destination_draft = Some(Destination::default());
+        app.undo_delete();
+        assert_eq!(app.settings.sources[0].name, "Stora salen");
+        assert_ne!(app.settings.sources[0].id, new_source_id);
+        assert_eq!(app.settings.sources[1].id, new_source_id);
+        assert_eq!(app.selected_source, Some(new_source_id));
+        assert!(app.new_destination_draft.is_some());
     }
 
     #[test]

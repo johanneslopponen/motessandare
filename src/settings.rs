@@ -1,5 +1,12 @@
+mod credentials;
+
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, env, fs, io::Write, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -31,6 +38,18 @@ impl Default for Destination {
 }
 
 impl Destination {
+    // Publishing uses only the HTTP origin. Drop pasted URL credentials and
+    // tokens before the server field is persisted or shown in a summary.
+    pub fn server_without_secrets(&self) -> Option<String> {
+        let url = url::Url::parse(self.server.trim()).ok()?;
+        (matches!(url.scheme(), "http" | "https")
+            && (!url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()))
+        .then(|| url.origin().ascii_serialization())
+    }
+
     pub fn display_name(&self) -> &str {
         if self.name.trim().is_empty() {
             "Namnlös destination"
@@ -213,6 +232,7 @@ impl Default for RawSource {
 
 #[derive(Deserialize)]
 struct RawSettingsObject {
+    credential_account: Option<String>,
     compact_overview: Option<bool>,
     #[serde(default)]
     theme: ThemePreference,
@@ -305,55 +325,30 @@ fn path() -> PathBuf {
 }
 
 pub fn settings_load() -> Result<Settings, String> {
-    let path = path();
-    #[cfg(target_os = "macos")]
-    return keychain::load(&path);
-    #[cfg(not(target_os = "macos"))]
-    load_plain(&path)
+    credentials::load(&path(), &credentials::SystemStore)
 }
 
 pub fn settings_save(settings: &Settings) -> Result<(), String> {
-    let path = path();
-    #[cfg(target_os = "macos")]
-    return keychain::save(&path, settings);
-    #[cfg(not(target_os = "macos"))]
-    save_plain(&path, settings)
+    credentials::save(&path(), settings, &credentials::SystemStore)
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
-fn load_plain(path: &std::path::Path) -> Result<Settings, String> {
-    match read_settings::<StoredSettings>(path)? {
-        None => Ok(Settings::default()),
-        Some(StoredSettings::Object(raw)) => Ok(migrate_raw(
-            raw.destinations,
-            raw.sources,
-            raw.compact_overview,
-            raw.theme,
-        )),
-        Some(StoredSettings::LegacyArray(sources)) => Ok(migrate_raw(
-            Vec::new(),
-            sources,
-            None,
-            ThemePreference::default(),
-        )),
-    }
-}
-
-#[cfg(any(not(target_os = "macos"), test))]
-fn save_plain(path: &std::path::Path, settings: &Settings) -> Result<(), String> {
-    // Never overwrite a configuration we cannot read.
-    read_settings::<StoredSettings>(path)?;
-    write_settings(path, settings)
-}
+const MAX_SETTINGS_BYTES: u64 = 16 * 1024 * 1024;
 
 fn read_settings<T: serde::de::DeserializeOwned>(
     path: &std::path::Path,
 ) -> Result<Option<T>, String> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(settings_file_error(path, err)),
     };
+    let mut bytes = Vec::new();
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| settings_file_error(path, err))?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err("Inställningsfilen är för stor för att öppna.".into());
+    }
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| format!("Inställningsfilen har ett ogiltigt format. Kontrollera filen ”{}” eller återställ den från en säkerhetskopia.", path.display()))
@@ -376,215 +371,25 @@ fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), 
     file.flush()
         .and_then(|_| file.as_file().sync_all())
         .map_err(file_error)?;
+    if file.as_file().metadata().map_err(file_error)?.len() > MAX_SETTINGS_BYTES {
+        return Err("Inställningarna är för stora för att spara.".into());
+    }
     file.persist(path).map_err(|err| file_error(err.error))?;
     Ok(())
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn restore_passwords(
-    bytes: &[u8],
-    destinations: &mut [Destination],
-    sources: &mut [RawSource],
-) -> Result<(), String> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StoredPasswords {
-        Global(Vec<String>),
-        Legacy(Vec<Vec<String>>),
-    }
-
-    const MISMATCH: &str = "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut.";
-    let passwords = serde_json::from_slice(bytes)
-        .map_err(|_| "De sparade lösenorden i Nyckelringen kunde inte läsas. Kontrollera appens uppgifter i Nyckelhanterare.")?;
-    match passwords {
-        StoredPasswords::Global(passwords) => {
-            if passwords.len() != destinations.len() {
-                return Err(MISMATCH.to_owned());
-            }
-            for (destination, password) in destinations.iter_mut().zip(passwords) {
-                destination.password = password;
-            }
-        }
-        StoredPasswords::Legacy(passwords) => {
-            if passwords.len() != sources.len()
-                || sources
-                    .iter()
-                    .zip(&passwords)
-                    .any(|(source, row)| source.destinations.len() != row.len())
-            {
-                return Err(MISMATCH.to_owned());
-            }
-            for (source, row) in sources.iter_mut().zip(passwords) {
-                for (destination, password) in source.destinations.iter_mut().zip(row) {
-                    destination.password = password;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-mod keychain {
-    use super::{
-        Deserialize, Destination, RawSource, Serialize, Settings, Source, ThemePreference, fs,
-        migrate_raw, read_settings, restore_passwords, settings_file_error, write_settings,
-    };
-    use security_framework::passwords::{
-        delete_generic_password, generic_password, set_generic_password,
-    };
-    use std::path::Path;
-
-    const SERVICE: &str = "se.motessandare.app.credentials";
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StoredSettings {
-        Protected(RawProtectedSettings),
-        Legacy(Vec<RawSource>),
-    }
-
-    #[derive(Deserialize)]
-    struct RawProtectedSettings {
-        compact_overview: Option<bool>,
-        #[serde(default)]
-        theme: ThemePreference,
-        credential_account: Option<String>,
-        #[serde(default)]
-        destinations: Vec<Destination>,
-        #[serde(default)]
-        sources: Vec<RawSource>,
-    }
-
-    #[derive(Serialize)]
-    struct ProtectedSettings {
-        compact_overview: Option<bool>,
-        theme: ThemePreference,
-        credential_account: Option<String>,
-        destinations: Vec<Destination>,
-        sources: Vec<Source>,
-    }
-
-    // Keep the same lock file across renames of sources.json. This keeps a reader
-    // from using the previous reference after a writer deletes its entry.
-    fn lock(path: &Path) -> Result<fs::File, String> {
-        let file_error = |err| settings_file_error(path, err);
-        fs::create_dir_all(path.parent().unwrap()).map_err(file_error)?;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("lock"))
-            .map_err(file_error)?;
-        file.lock().map_err(file_error)?;
-        Ok(file)
-    }
-
-    pub fn load(path: &Path) -> Result<Settings, String> {
-        let _lock = lock(path)?;
-        match read_settings(path)? {
-            None => Ok(Settings::default()),
-            Some(StoredSettings::Legacy(raw_sources)) => {
-                let settings =
-                    migrate_raw(Vec::new(), raw_sources, None, ThemePreference::default());
-                if settings
-                    .destinations
-                    .iter()
-                    .any(|dest| !dest.password.is_empty())
-                {
-                    commit(path, &settings, None)?;
-                }
-                Ok(settings)
-            }
-            Some(StoredSettings::Protected(raw)) => hydrate(raw),
-        }
-    }
-
-    pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
-        let _lock = lock(path)?;
-        let previous_account = match read_settings(path)? {
-            Some(StoredSettings::Protected(raw)) => {
-                let account = raw.credential_account.clone();
-                hydrate(raw)?;
-                account
-            }
-            Some(StoredSettings::Legacy(_)) | None => None,
-        };
-        commit(path, settings, previous_account.as_deref())
-    }
-
-    fn hydrate(mut raw: RawProtectedSettings) -> Result<Settings, String> {
-        if let Some(account) = raw.credential_account {
-            let bytes = generic_password(SERVICE, &account).map_err(keychain_error)?;
-            restore_passwords(&bytes, &mut raw.destinations, &mut raw.sources)?;
-        }
-        Ok(migrate_raw(
-            raw.destinations,
-            raw.sources,
-            raw.compact_overview,
-            raw.theme,
-        ))
-    }
-
-    fn commit(
-        path: &Path,
-        settings: &Settings,
-        previous_account: Option<&str>,
-    ) -> Result<(), String> {
-        let mut safe_destinations = settings.destinations.clone();
-        let passwords: Vec<String> = safe_destinations
-            .iter_mut()
-            .map(|destination| std::mem::take(&mut destination.password))
-            .collect();
-        let new_account = if passwords.iter().any(|password| !password.is_empty()) {
-            // Use a fresh Keychain item so a failure writing JSON leaves the
-            // current settings and their existing Keychain entry intact.
-            let unique = tempfile::Builder::new()
-                .prefix("settings-")
-                .rand_bytes(24)
-                .tempfile_in(path.parent().unwrap())
-                .map_err(|err| settings_file_error(path, err))?;
-            let account = unique
-                .path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            let data = serde_json::to_vec(&passwords)
-                .map_err(|_| "Lösenorden kunde inte förberedas för Nyckelringen.")?;
-            set_generic_password(SERVICE, &account, &data).map_err(keychain_error)?;
-            Some(account)
-        } else {
-            None
-        };
-        let protected = ProtectedSettings {
-            compact_overview: settings.compact_overview,
-            theme: settings.theme,
-            credential_account: new_account,
-            destinations: safe_destinations,
-            sources: settings.sources.clone(),
-        };
-        if let Err(err) = write_settings(path, &protected) {
-            if let Some(account) = &protected.credential_account {
-                let _ = delete_generic_password(SERVICE, account);
-            }
-            return Err(err);
-        }
-        if let Some(account) = previous_account {
-            let _ = delete_generic_password(SERVICE, account);
-        }
-        Ok(())
-    }
-
-    fn keychain_error(_error: security_framework::base::Error) -> String {
-        "Det gick inte att komma åt lösenorden i Nyckelringen. Kontrollera att den är upplåst och att Mötessändare har åtkomst.".into()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use credentials::{Store, TestStore, restore_passwords};
+
+    fn load_test_settings(path: &Path) -> Result<Settings, String> {
+        credentials::load(path, &TestStore)
+    }
+
+    fn save_test_settings(path: &Path, settings: &Settings) -> Result<(), String> {
+        credentials::save(path, settings, &TestStore)
+    }
 
     #[test]
     fn restores_global_passwords_including_empty_slots_in_destination_order() {
@@ -676,8 +481,8 @@ mod tests {
             }],
         };
 
-        save_plain(&file, &settings).unwrap();
-        let loaded = load_plain(&file).unwrap();
+        save_test_settings(&file, &settings).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
         assert_eq!(loaded, settings);
     }
 
@@ -732,7 +537,7 @@ mod tests {
         ]"#;
         fs::write(&file, legacy_json).unwrap();
 
-        let loaded = load_plain(&file).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
         assert_eq!(loaded.destinations.len(), 2);
         assert_eq!(loaded.destinations[0].id, 1);
         assert_eq!(loaded.destinations[0].name, "Destination 1");
@@ -760,7 +565,7 @@ mod tests {
         }"#;
         fs::write(&file, json).unwrap();
 
-        let loaded = load_plain(&file).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
         assert_eq!(loaded.sources[0].destination_ids, vec![5]);
     }
 
@@ -787,7 +592,7 @@ mod tests {
         )
         .unwrap();
 
-        let settings = load_plain(&file).unwrap();
+        let settings = load_test_settings(&file).unwrap();
         assert_eq!(settings.destinations.len(), 3);
         assert_eq!(settings.destinations[0].name, "Huvud");
         let routes = settings.sources[0].resolve_destinations(&settings.destinations);
@@ -818,7 +623,7 @@ mod tests {
         }"#;
         fs::write(&file, json).unwrap();
 
-        let loaded = load_plain(&file).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
         let mounts: Vec<_> = loaded.sources[0]
             .resolve_destinations(&loaded.destinations)
             .into_iter()
@@ -853,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_plain(&file).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
         let source_devices: Vec<_> = loaded
             .sources
             .iter()
@@ -870,8 +675,8 @@ mod tests {
             ]
         );
         assert_eq!(loaded.next_source_id(), 6);
-        save_plain(&file, &loaded).unwrap();
-        assert_eq!(load_plain(&file).unwrap(), loaded);
+        save_test_settings(&file, &loaded).unwrap();
+        assert_eq!(load_test_settings(&file).unwrap(), loaded);
     }
 
     #[test]
@@ -880,8 +685,99 @@ mod tests {
         let file = dir.path().join("sources.json");
         fs::write(&file, "{ not valid json").unwrap();
 
-        let result = save_plain(&file, &Settings::default());
+        let result = save_test_settings(&file, &Settings::default());
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), "{ not valid json");
+    }
+
+    #[test]
+    fn migrates_plaintext_object_and_binds_secrets_to_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        fs::write(&file, r#"{"destinations":[{"id":1,"server":"https://user:url-secret@first.example/unused?token=query-secret","password":"first secret"},{"id":2,"server":"https://second.example","password":"second secret"}]}"#).unwrap();
+        let original = load_test_settings(&file).unwrap();
+        assert_eq!(original.destinations[0].server, "https://first.example");
+        let saved = fs::read_to_string(&file).unwrap();
+        assert!(!saved.contains("secret") && !saved.contains("\"password\""));
+        let mut json: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        json["destinations"].as_array_mut().unwrap().reverse();
+        fs::write(&file, json.to_string()).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
+        assert_eq!(loaded.destinations[0], original.destinations[1]);
+        assert_eq!(loaded.destinations[1], original.destinations[0]);
+        json["destinations"][0]["server"] = "https://other.example".into();
+        let changed = json.to_string();
+        fs::write(&file, &changed).unwrap();
+        assert!(load_test_settings(&file).is_err());
+        assert!(save_test_settings(&file, &original).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    }
+
+    #[test]
+    fn upgrades_old_keychain_references_only_after_saving_the_new_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        let old_account = TestStore.put(dir.path(), br#"["old secret"]"#).unwrap();
+        let old =
+            serde_json::json!({"credential_account": old_account, "destinations":[{"id": 7}]});
+        fs::write(&file, old.to_string()).unwrap();
+        let settings = load_test_settings(&file).unwrap();
+        assert_eq!(settings.destinations[0].password, "old secret");
+        assert!(TestStore.get(&old_account).is_err());
+        assert_eq!(load_test_settings(&file).unwrap(), settings);
+    }
+
+    #[test]
+    fn credential_store_failure_preserves_the_original_file() {
+        struct Unavailable;
+        impl Store for Unavailable {
+            fn put(&self, _: &Path, _: &[u8]) -> Result<String, String> {
+                Err("Unavailable".into())
+            }
+            fn get(&self, _: &str) -> Result<Vec<u8>, String> {
+                Err("Unavailable".into())
+            }
+            fn remove(&self, _: &str) {
+                panic!("no credentials should be removed");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        let legacy = r#"[{"destinations":[{"password":"old secret"}]}]"#;
+        fs::write(&file, legacy).unwrap();
+        assert!(credentials::load(&file, &Unavailable).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), legacy);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "requires access to an unlocked desktop credential store"
+    )]
+    fn round_trips_and_removes_credentials_with_the_system_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        let store = credentials::SystemStore;
+        fs::write(
+            &file,
+            r#"{"destinations":[{"id":1,"password":"system-store test secret"}]}"#,
+        )
+        .unwrap();
+        let settings = credentials::load(&file, &store).unwrap();
+        assert_eq!(
+            settings.destinations[0].password,
+            "system-store test secret"
+        );
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("system-store test secret")
+        );
+        assert_eq!(credentials::load(&file, &store).unwrap(), settings);
+        credentials::save(&file, &Settings::default(), &store).unwrap();
+        assert_eq!(
+            credentials::load(&file, &store).unwrap(),
+            Settings::default()
+        );
     }
 }

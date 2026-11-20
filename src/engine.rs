@@ -283,6 +283,7 @@ impl Engine {
         let mixer = self.mixer.lock().unwrap();
         let mut status = LiveStatus::default();
         if let Some(session) = mixer.sessions.get(&id) {
+            status.present = session.present;
             status.stream_attempt = session.stream_attempt;
             status.record_attempt = session.record_attempt;
             for (index, stream) in session.streams.iter().enumerate() {
@@ -427,6 +428,7 @@ impl Engine {
 
 #[derive(Default)]
 pub struct LiveStatus {
+    pub present: bool,
     pub connected: usize,
     pub stream_attempt: u64,
     pub stream_elapsed: Duration,
@@ -592,10 +594,9 @@ fn route(source: &Source, input: Option<&Block>) -> (Vec<f32>, (f32, f32), bool)
 // prebuffer absorbs hardware callback jitter. Fractional phase survives ticks.
 #[derive(Default)]
 struct Converter {
+    stream: Option<Reader>,
     samples: Vec<f32>,
     phase: f64,
-    channels: usize,
-    rate: u32,
     ready: bool,
 }
 
@@ -603,10 +604,13 @@ impl Converter {
     fn pull(&mut self, reader: &Reader) -> Option<Block> {
         let rate = reader.rate();
         let channels = reader.channels();
-        if (rate, channels) != (self.rate, self.channels) {
+        if self
+            .stream
+            .as_ref()
+            .is_none_or(|stream| !stream.same_stream(reader))
+        {
             *self = Self {
-                rate,
-                channels,
+                stream: Some(reader.clone()),
                 ..Default::default()
             };
         }
@@ -649,7 +653,11 @@ impl Converter {
         }
         let consumed = (self.phase as usize).min(available);
         self.samples.drain(..consumed * channels);
-        self.phase -= consumed as f64;
+        self.phase = if self.ready {
+            self.phase - consumed as f64
+        } else {
+            0.0
+        };
         Some(Block {
             channels,
             samples: out,
@@ -781,6 +789,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn converter_restarts_phase_after_downsampling_underrun() {
+        let reader = synthetic_reader(1, 96_000);
+        let mut converter = Converter::default();
+        feed(&reader, &[0.75; 2880]);
+        converter.pull(&reader).unwrap();
+
+        reader.read(usize::MAX).unwrap();
+        converter.pull(&reader).unwrap();
+        let mut replacement = [0.5; 2880];
+        replacement[0] = 0.25;
+        feed(&reader, &replacement);
+
+        assert_eq!(converter.pull(&reader).unwrap().samples[0], 0.25);
+    }
+
+    #[test]
     fn device_removal_discards_converter_history_before_replug() {
         let reader = synthetic_reader(2, RATE as u32);
         let mut readers = HashMap::from([("device".into(), reader.clone())]);
@@ -790,6 +814,25 @@ pub(crate) mod tests {
 
         readers.clear();
         assert!(read_inputs(&readers, &mut converters).is_empty());
+
+        let replacement = synthetic_reader(2, RATE as u32);
+        feed(&replacement, &[-0.5; 1439 * 2]);
+        readers.insert("device".into(), replacement.clone());
+        assert!(read_inputs(&readers, &mut converters).is_empty());
+        feed(&replacement, &[-0.5, -0.5]);
+        assert_eq!(
+            read_inputs(&readers, &mut converters)["device"].samples,
+            vec![-0.5; FRAMES * 2]
+        );
+    }
+
+    #[test]
+    fn converter_rebuffers_a_replacement_stream_with_the_same_device_and_format() {
+        let reader = synthetic_reader(2, RATE as u32);
+        let mut readers = HashMap::from([("device".into(), reader.clone())]);
+        let mut converters = HashMap::new();
+        feed(&reader, &[0.75; 1440 * 2]);
+        assert!(read_inputs(&readers, &mut converters).contains_key("device"));
 
         let replacement = synthetic_reader(2, RATE as u32);
         feed(&replacement, &[-0.5; 1439 * 2]);

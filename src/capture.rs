@@ -165,9 +165,7 @@ impl Capture {
                 continue;
             }
 
-            if !device.supports_input() {
-                continue;
-            }
+            // Some hosts can provide the default even if listing supported formats fails.
             let configs = input_configs(
                 device.default_input_config().ok(),
                 device.supported_input_configs().into_iter().flatten(),
@@ -221,6 +219,10 @@ fn input_error_hint(kind: ErrorKind) -> &'static str {
 }
 
 impl Reader {
+    pub fn same_stream(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ring, &other.ring)
+    }
+
     pub fn rate(&self) -> u32 {
         self.rate
     }
@@ -275,7 +277,9 @@ impl AudioRing {
             .chain(&self.samples[..last])
             .zip(input)
         {
-            slot.store(f32::from_sample_(sample).to_bits(), Ordering::Relaxed);
+            let sample = f32::from_sample_(sample);
+            let sample = if sample.is_finite() { sample } else { 0.0 };
+            slot.store(sample.to_bits(), Ordering::Relaxed);
         }
         self.written_at
             .store(written.wrapping_add(frames), Ordering::Release);
@@ -449,7 +453,9 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{AudioRing, Reader, input_configs};
-    use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
+    use cpal::{
+        SampleFormat, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
+    };
     use std::sync::Arc;
 
     pub(crate) fn synthetic_reader(channels: usize, rate: u32) -> Reader {
@@ -494,7 +500,11 @@ pub(crate) mod tests {
     #[test]
     fn input_selection_uses_available_format_when_one_probe_fails() {
         let range = SupportedStreamConfigRange::new(
-            2, 44_100, 96_000, SupportedBufferSize::Unknown, SampleFormat::F32,
+            2,
+            44_100,
+            96_000,
+            SupportedBufferSize::Unknown,
+            SampleFormat::F32,
         );
         let expected = range.with_sample_rate(48_000);
         assert_eq!(input_configs(None, [range]), [expected]);
@@ -513,6 +523,24 @@ pub(crate) mod tests {
         assert_eq!(reader.queued_frames(), Some(1));
         assert_eq!(reader.read(8), Some((vec![0.5, -0.5], 2, 48_000)));
         assert_eq!(clone.queued_frames(), Some(0));
+    }
+
+    #[test]
+    fn nonfinite_capture_samples_are_silent_without_affecting_other_channels() {
+        let reader = synthetic_reader(2, 48_000);
+        let samples = [
+            f32::NAN,
+            0.25,
+            f32::INFINITY,
+            -0.5,
+            -0.75,
+            f32::NEG_INFINITY,
+        ];
+        feed(&reader, &samples);
+        assert_eq!(
+            reader.read(3).unwrap().0,
+            [0.0, 0.25, 0.0, -0.5, -0.75, 0.0]
+        );
     }
 
     #[test]
