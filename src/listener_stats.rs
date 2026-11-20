@@ -126,8 +126,12 @@ fn fetch(url: &str) -> ServerResult {
             "Icecast-servern kunde inte nås. Kontrollera nätverket och serveradressen under Destinationer."
         }
     })?;
-    if !response.status().is_success() {
-        let code = response.status().as_u16();
+    read_response(response.status(), response)
+}
+
+fn read_response(status: reqwest::StatusCode, response: impl Read) -> ServerResult {
+    if !status.is_success() {
+        let code = status.as_u16();
         let message = match code {
             401 | 403 => "Servern tillåter inte att appen läser den publika lyssnarstatistiken.",
             404 => {
@@ -310,6 +314,42 @@ mod tests {
         ));
         stats.update(&ctx, HashSet::new(), false);
         assert!(matches!(stats.status(&target), MountStatus::Loading));
+    }
+
+    #[test]
+    fn distinguishes_access_denied_missing_status_page_and_server_failure() {
+        use reqwest::StatusCode;
+
+        for (status, hint) in [
+            (StatusCode::UNAUTHORIZED, "tillåter inte"),
+            (StatusCode::FORBIDDEN, "tillåter inte"),
+            (StatusCode::NOT_FOUND, "Statistiksidan saknas"),
+            (StatusCode::SERVICE_UNAVAILABLE, "Försök igen"),
+        ] {
+            let error = read_response(status, &b"<html>Error</html>"[..]).unwrap_err();
+            assert!(error.contains(hint), "{error}");
+            assert!(
+                error.contains(&format!("HTTP {}", status.as_u16())),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_the_largest_status_document_and_limits_reads_from_oversized_ones() {
+        let mut body = br#"{"icestats":{}}"#.to_vec();
+        body.resize(MAX_RESPONSE_BYTES as usize, b' ');
+        assert!(
+            read_response(reqwest::StatusCode::OK, body.as_slice())
+                .unwrap()
+                .is_empty()
+        );
+
+        body.extend_from_slice(b"  ");
+        let mut unread = body.as_slice();
+        let error = read_response(reqwest::StatusCode::OK, &mut unread).unwrap_err();
+        assert!(error.contains("för stor"), "{error}");
+        assert_eq!(unread, b" ");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
     Device, ErrorKind, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
+    SupportedStreamConfigRange,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -163,7 +164,10 @@ impl Capture {
             if !device.supports_input() {
                 continue;
             }
-            let configs = input_configs(&device);
+            let configs = input_configs(
+                device.default_input_config().ok(),
+                device.supported_input_configs().into_iter().flatten(),
+            );
             if configs.is_empty() {
                 continue;
             }
@@ -293,8 +297,10 @@ impl AudioRing {
     }
 }
 
-fn input_configs(device: &Device) -> Vec<SupportedStreamConfig> {
-    let default = device.default_input_config().ok();
+fn input_configs(
+    default: Option<SupportedStreamConfig>,
+    ranges: impl IntoIterator<Item = SupportedStreamConfigRange>,
+) -> Vec<SupportedStreamConfig> {
     let preferred_rate = default
         .as_ref()
         .map_or(48_000, SupportedStreamConfig::sample_rate);
@@ -304,15 +310,13 @@ fn input_configs(device: &Device) -> Vec<SupportedStreamConfig> {
     {
         configs.push(config);
     }
-    if let Ok(ranges) = device.supported_input_configs() {
-        configs.extend(ranges.filter_map(|range| {
-            if range.channels() == 0 || !pcm(range.sample_format()) {
-                return None;
-            }
-            let rate = preferred_rate.clamp(range.min_sample_rate(), range.max_sample_rate());
-            range.try_with_sample_rate(rate)
-        }));
-    }
+    configs.extend(ranges.into_iter().filter_map(|range| {
+        if range.channels() == 0 || !pcm(range.sample_format()) {
+            return None;
+        }
+        let rate = preferred_rate.clamp(range.min_sample_rate(), range.max_sample_rate());
+        range.try_with_sample_rate(rate)
+    }));
 
     // Preserve all hardware channels first, and use the device's native rate when possible.
     configs.sort_by_key(|config| {
@@ -440,7 +444,8 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{AudioRing, Reader};
+    use super::{AudioRing, Reader, input_configs};
+    use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
     use std::sync::Arc;
 
     pub(crate) fn synthetic_reader(channels: usize, rate: u32) -> Reader {
@@ -453,6 +458,44 @@ pub(crate) mod tests {
 
     pub(crate) fn feed(reader: &Reader, samples: &[f32]) {
         reader.ring.push(samples);
+    }
+
+    #[test]
+    fn input_selection_preserves_hardware_channels_then_prefers_native_rate() {
+        let buffer = SupportedBufferSize::Unknown;
+        let stereo = SupportedStreamConfig::new(2, 44_100, buffer, SampleFormat::I16);
+        let range = |channels, min, max, format| {
+            SupportedStreamConfigRange::new(channels, min, max, buffer, format)
+        };
+        let configs = input_configs(
+            Some(stereo),
+            [
+                range(32, 48_000, 96_000, SampleFormat::F32),
+                range(32, 32_000, 48_000, SampleFormat::I24),
+                range(64, 44_100, 44_100, SampleFormat::DsdU8),
+                range(0, 44_100, 44_100, SampleFormat::I16),
+                range(2, 44_100, 48_000, SampleFormat::I16),
+            ],
+        );
+        assert_eq!(
+            configs,
+            [
+                SupportedStreamConfig::new(32, 44_100, buffer, SampleFormat::I24),
+                SupportedStreamConfig::new(32, 48_000, buffer, SampleFormat::F32),
+                stereo,
+            ]
+        );
+    }
+
+    #[test]
+    fn input_selection_uses_available_format_when_one_probe_fails() {
+        let range = SupportedStreamConfigRange::new(
+            2, 44_100, 96_000, SupportedBufferSize::Unknown, SampleFormat::F32,
+        );
+        let expected = range.with_sample_rate(48_000);
+        assert_eq!(input_configs(None, [range]), [expected]);
+        assert_eq!(input_configs(Some(expected), []), [expected]);
+        assert!(input_configs(None, []).is_empty());
     }
 
     #[test]

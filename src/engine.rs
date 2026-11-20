@@ -620,11 +620,11 @@ impl Converter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::capture::tests::{feed, synthetic_reader};
 
-    fn test_engine() -> Engine {
+    pub(crate) fn test_engine() -> Engine {
         Engine {
             mixer: Arc::new(Mutex::new(Mixer::default())),
             inputs: Arc::new(Mutex::new(Inputs::default())),
@@ -765,40 +765,80 @@ mod tests {
 
     #[test]
     fn meter_holds_short_peak_and_latches_each_channel_until_reset() {
-        let mut mixer = Mixer::default();
+        let engine = test_engine();
         let source = Source {
             device: "mic".into(),
             right: Some(1),
             ..Source::default()
         };
         let id = source.id;
-        mixer.sources.push(source);
+        engine.update(std::slice::from_ref(&source));
         let mut samples = vec![0.0; FRAMES * 2];
         samples[0] = -1.0;
         samples[1] = 0.5;
-        mixer.render(&HashMap::from([(
+        let block = HashMap::from([(
             "mic".into(),
             Block {
                 channels: 2,
                 samples,
             },
-        )]));
+        )]);
+        let mut mixer = engine.mixer.lock().unwrap();
+        mixer.render(&block);
         for _ in 0..150 {
             mixer.render(&HashMap::new());
         }
-        let levels = &mut mixer.sessions.get_mut(&id).unwrap().meters;
-        assert_eq!(levels[0].level.held, 1.0);
-        assert!(levels[0].level.signal < 0.01);
-        assert!(levels[0].level.clipped);
-        assert!(!levels[1].level.clipped);
-        levels[0].update(0.0);
-        assert!(levels[0].level.held < 1.0);
-        assert!(levels[0].level.clipped);
-        levels[0].level.clipped = false;
-        levels[0].update(0.1);
-        assert!(!levels[0].level.clipped);
-        levels[0].update(1.01);
-        assert!(levels[0].level.clipped);
+        drop(mixer);
+        let levels = engine.levels(id);
+        assert_eq!(levels[0].held, 1.0);
+        assert!(levels[0].signal < 0.01);
+        assert!(levels[0].clipped);
+        assert!(!levels[1].clipped);
+        engine.mixer.lock().unwrap().render(&HashMap::new());
+        assert!(engine.levels(id)[0].held < 1.0);
+        engine.reset_clip(id, 1);
+        assert!(engine.levels(id)[0].clipped);
+        engine.reset_clip(id, 0);
+        assert!(!engine.levels(id)[0].clipped);
+        engine.mixer.lock().unwrap().render(&block);
+        assert!(engine.levels(id)[0].clipped);
+    }
+
+    #[test]
+    fn changing_source_routing_clears_only_the_affected_meter_history() {
+        let engine = test_engine();
+        let mut source = Source {
+            device: "mic".into(),
+            right: Some(1),
+            ..Source::default()
+        };
+        let inputs = HashMap::from([(
+            "mic".into(),
+            Block {
+                channels: 3,
+                samples: [1.0, -1.0, 0.25].repeat(FRAMES),
+            },
+        )]);
+        engine.update(std::slice::from_ref(&source));
+        engine.mixer.lock().unwrap().render(&inputs);
+        assert!(engine.levels(source.id).iter().all(|level| level.clipped));
+
+        source.left = 2;
+        engine.update(std::slice::from_ref(&source));
+        let [left, right] = engine.levels(source.id);
+        assert_eq!(left.held, 0.0);
+        assert!(!left.clipped);
+        assert_eq!(right.held, 1.0);
+        assert!(right.clipped);
+
+        engine.mixer.lock().unwrap().render(&inputs);
+        source.device = "replacement".into();
+        engine.update(std::slice::from_ref(&source));
+        for level in engine.levels(source.id) {
+            assert_eq!(level.held, 0.0);
+            assert_eq!(level.signal, 0.0);
+            assert!(!level.clipped);
+        }
     }
 
     #[test]

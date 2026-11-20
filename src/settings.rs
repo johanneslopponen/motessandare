@@ -351,11 +351,55 @@ fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), 
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn restore_passwords(
+    bytes: &[u8],
+    destinations: &mut [Destination],
+    sources: &mut [RawSource],
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredPasswords {
+        Global(Vec<String>),
+        Legacy(Vec<Vec<String>>),
+    }
+
+    const MISMATCH: &str = "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut.";
+    let passwords = serde_json::from_slice(bytes)
+        .map_err(|_| "De sparade lösenorden i Nyckelringen kunde inte läsas. Kontrollera appens uppgifter i Nyckelhanterare.")?;
+    match passwords {
+        StoredPasswords::Global(passwords) => {
+            if passwords.len() != destinations.len() {
+                return Err(MISMATCH.to_owned());
+            }
+            for (destination, password) in destinations.iter_mut().zip(passwords) {
+                destination.password = password;
+            }
+        }
+        StoredPasswords::Legacy(passwords) => {
+            if passwords.len() != sources.len()
+                || sources
+                    .iter()
+                    .zip(&passwords)
+                    .any(|(source, row)| source.destinations.len() != row.len())
+            {
+                return Err(MISMATCH.to_owned());
+            }
+            for (source, row) in sources.iter_mut().zip(passwords) {
+                for (destination, password) in source.destinations.iter_mut().zip(row) {
+                    destination.password = password;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod keychain {
     use super::{
         Deserialize, Destination, RawSource, Serialize, Settings, Source, fs, migrate_raw,
-        read_settings, settings_file_error, write_settings,
+        read_settings, restore_passwords, settings_file_error, write_settings,
     };
     use security_framework::passwords::{
         delete_generic_password, generic_password, set_generic_password,
@@ -363,13 +407,6 @@ mod keychain {
     use std::path::Path;
 
     const SERVICE: &str = "se.motessandare.app.credentials";
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StoredPasswords {
-        Global(Vec<String>),
-        Legacy(Vec<Vec<String>>),
-    }
 
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -447,42 +484,13 @@ mod keychain {
     fn hydrate(mut raw: RawProtectedSettings) -> Result<Settings, String> {
         if let Some(account) = raw.credential_account {
             let bytes = generic_password(SERVICE, &account).map_err(keychain_error)?;
-            let passwords: StoredPasswords = serde_json::from_slice(&bytes)
-                .map_err(|_| "De sparade lösenorden i Nyckelringen kunde inte läsas. Kontrollera appens uppgifter i Nyckelhanterare.".to_owned())?;
-            match passwords {
-                StoredPasswords::Global(passwords) => {
-                    if passwords.len() != raw.destinations.len() {
-                        return Err(
-                            "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut."
-                                .to_owned(),
-                        );
-                    }
-                    for (destination, password) in raw.destinations.iter_mut().zip(passwords) {
-                        destination.password = password;
-                    }
-                }
-                StoredPasswords::Legacy(passwords) => {
-                    if passwords.len() != raw.sources.len()
-                        || raw
-                            .sources
-                            .iter()
-                            .zip(&passwords)
-                            .any(|(source, row)| source.destinations.len() != row.len())
-                    {
-                        return Err(
-                            "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut."
-                                .to_owned(),
-                        );
-                    }
-                    for (source, row) in raw.sources.iter_mut().zip(passwords) {
-                        for (destination, password) in source.destinations.iter_mut().zip(row) {
-                            destination.password = password;
-                        }
-                    }
-                }
-            }
+            restore_passwords(&bytes, &mut raw.destinations, &mut raw.sources)?;
         }
-        Ok(migrate_raw(raw.destinations, raw.sources, raw.compact_overview))
+        Ok(migrate_raw(
+            raw.destinations,
+            raw.sources,
+            raw.compact_overview,
+        ))
     }
 
     fn commit(
@@ -542,6 +550,59 @@ mod keychain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restores_global_passwords_including_empty_slots_in_destination_order() {
+        let mut destinations = vec![Destination::default(); 3];
+        restore_passwords(br#"["first","","third"]"#, &mut destinations, &mut []).unwrap();
+        assert_eq!(
+            destinations
+                .iter()
+                .map(|d| d.password.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "", "third"]
+        );
+    }
+
+    #[test]
+    fn restores_legacy_passwords_before_deduplicating_source_routes() {
+        let mut sources: Vec<RawSource> =
+            serde_json::from_str(r#"[{"destinations":[{},{}]},{"destinations":[{}]}]"#).unwrap();
+        restore_passwords(br#"[["first","shared"],["shared"]]"#, &mut [], &mut sources).unwrap();
+        let settings = migrate_raw(Vec::new(), sources, None);
+        assert_eq!(settings.destinations.len(), 2);
+        assert_eq!(settings.destinations[0].password, "first");
+        assert_eq!(settings.destinations[1].password, "shared");
+        let first_id = settings.destinations[0].id;
+        let shared_id = settings.destinations[1].id;
+        assert_eq!(settings.sources[0].destination_ids, [first_id, shared_id]);
+        assert_eq!(settings.sources[1].destination_ids, [shared_id]);
+    }
+
+    #[test]
+    fn rejects_corrupt_or_mismatched_keychain_payloads_without_partial_restoration() {
+        let mut destinations = vec![Destination::default(); 2];
+        let mut sources: Vec<RawSource> =
+            serde_json::from_str(r#"[{"destinations":[{}]},{"destinations":[{}]}]"#).unwrap();
+        for payload in [
+            "not json",
+            r#"["only one global entry"]"#,
+            r#"[["only one source"]]"#,
+            r#"[["first"],[]]"#,
+        ] {
+            assert!(
+                restore_passwords(payload.as_bytes(), &mut destinations, &mut sources).is_err(),
+                "{payload}"
+            );
+            assert!(destinations.iter().all(|dest| dest.password.is_empty()));
+            assert!(
+                sources
+                    .iter()
+                    .flat_map(|s| &s.destinations)
+                    .all(|dest| dest.password.is_empty())
+            );
+        }
+    }
 
     #[test]
     fn saves_and_loads_global_destinations_and_source_references() {
@@ -665,6 +726,43 @@ mod tests {
 
         let loaded = load_plain(&file).unwrap();
         assert_eq!(loaded.sources[0].destination_ids, vec![5]);
+    }
+
+    #[test]
+    fn merges_inline_destinations_with_existing_routes_in_configured_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        fs::write(
+            &file,
+            r#"{
+            "destinations": [
+                {"id":3,"name":"Huvud","mount":"/main","password":"shared"},
+                {"id":9,"mount":"/backup"}
+            ],
+            "sources": [{
+                "destination_ids":[9],
+                "destinations":[
+                    {"mount":"/backup"},
+                    {"name":"Old name","mount":"/main","password":"shared"},
+                    {"mount":"/main","password":"different"}
+                ]
+            }]
+        }"#,
+        )
+        .unwrap();
+
+        let settings = load_plain(&file).unwrap();
+        assert_eq!(settings.destinations.len(), 3);
+        assert_eq!(settings.destinations[0].name, "Huvud");
+        let routes = settings.sources[0].resolve_destinations(&settings.destinations);
+        let endpoints: Vec<_> = routes
+            .iter()
+            .map(|d| (d.mount.as_str(), d.password.as_str()))
+            .collect();
+        assert_eq!(
+            endpoints,
+            [("/backup", ""), ("/main", "shared"), ("/main", "different")]
+        );
     }
 
     #[test]

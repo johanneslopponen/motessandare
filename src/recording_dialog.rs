@@ -200,6 +200,49 @@ fn reveal_file(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_ui::click_button;
+
+    #[test]
+    fn save_name_keeps_dialog_open_and_done_keeps_the_last_saved_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("Möte.wav");
+        let saved = dir.path().join("Kvällsmöte.wav");
+        std::fs::write(&original, b"audio").unwrap();
+        let mut dialog = SavedRecording::new("Sal".into(), original.clone());
+        let ctx = egui::Context::default();
+        dialog.name = " Kvällsmöte ".into();
+        let mut closed = false;
+        click_button(&ctx, "Spara namn", |ctx| closed |= dialog.show(ctx));
+        assert!(!closed);
+        assert_eq!(dialog.path, saved);
+        assert_eq!(dialog.name, "Kvällsmöte");
+        assert!(!original.exists());
+
+        dialog.name = "Utkast".into();
+        click_button(&ctx, "Klar", |ctx| closed |= dialog.show(ctx));
+        assert!(closed);
+        assert_eq!(std::fs::read(saved).unwrap(), b"audio");
+        assert!(!dir.path().join("Utkast.wav").exists());
+    }
+
+    #[test]
+    fn keep_name_discards_a_conflicting_edit_and_clears_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("Möte.flac");
+        let existing = dir.path().join("Arkiv.flac");
+        std::fs::write(&original, b"audio").unwrap();
+        std::fs::write(&existing, b"existing").unwrap();
+        let mut dialog = SavedRecording::new("Sal".into(), original.clone());
+        let ctx = egui::Context::default();
+        dialog.name = "Arkiv".into();
+        click_button(&ctx, "Spara namn", |ctx| assert!(!dialog.show(ctx)));
+        assert!(dialog.error.is_some());
+        click_button(&ctx, "Behåll namnet", |ctx| assert!(!dialog.show(ctx)));
+        assert!(dialog.error.is_none());
+        assert_eq!(dialog.name, "Möte");
+        assert_eq!(std::fs::read(original).unwrap(), b"audio");
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+    }
 
     #[test]
     fn rename_preserves_extension_and_protects_existing_files() {

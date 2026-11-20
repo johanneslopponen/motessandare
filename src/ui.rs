@@ -260,12 +260,18 @@ impl Ui {
         });
 
         let app_icon = load_app_icon_texture(ctx);
+        Self::from_settings(settings_load(), Engine::new(), app_icon)
+    }
 
-        let (settings, load_error) = match settings_load() {
+    fn from_settings(
+        loaded: Result<Settings, String>,
+        engine: Engine,
+        app_icon: Option<TextureHandle>,
+    ) -> Self {
+        let (settings, load_error) = match loaded {
             Ok(settings) => (settings, None),
             Err(err) => (Settings::default(), Some(err)),
         };
-        let engine = Engine::new();
         engine.update(&settings.sources);
         let selected_source = settings.sources.first().map(|source| source.id);
         Self {
@@ -3750,6 +3756,7 @@ fn choice(ui: &mut EguiUi, id: &str, current: &mut String, values: &[&str]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_ui::click_button;
 
     #[test]
     fn active_window_close_requires_explicit_confirmation() {
@@ -3766,6 +3773,83 @@ mod tests {
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
             assert_eq!(commands.contains(&egui::ViewportCommand::CancelClose), blocked);
         }
+    }
+
+    #[test]
+    fn close_dialog_only_discards_unsaved_changes_when_confirmed() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let mut app = Ui::from_settings(
+            Ok(Settings::default()),
+            crate::engine::tests::test_engine(),
+            None,
+        );
+        let palette = Palette::for_theme(false);
+        for (discard_changes, button, expect_close, expect_dirty) in [
+            (true, "Avbryt", false, true),
+            (false, "Stäng", true, true),
+            (true, "Stäng", true, false),
+        ] {
+            app.save_state = SaveState::Failed("disk full".into());
+            app.confirm_stop = Some(StopConfirm::Close { discard_changes });
+            app.close_confirmed = false;
+            let output = click_button(&ctx, button, |ctx| app.stop_confirm_modal(ctx, palette));
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(commands.contains(&egui::ViewportCommand::Close), expect_close);
+            assert_eq!(app.close_confirmed, expect_close);
+            assert_eq!(app.save_state.dirty(), expect_dirty);
+            assert!(app.confirm_stop.is_none());
+        }
+    }
+
+    #[test]
+    fn creating_a_destination_from_a_source_only_changes_routing_on_confirmation() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let mut source = Source {
+            destination_ids: vec![2],
+            ..Default::default()
+        };
+        let existing = Destination {
+            id: 2,
+            name: "Befintlig".into(),
+            ..Default::default()
+        };
+        let mut destinations = vec![existing.clone()];
+        let mut draft = None;
+        for (button, expect_changed) in [
+            ("Skapa ny destination", false),
+            ("Avbryt", false),
+            ("Skapa ny destination", false),
+            ("Skapa och välj", true),
+        ] {
+            let mut changed = false;
+            click_button(&ctx, button, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed |= source_settings(
+                        ui, &mut source, &mut destinations, &mut draft, &[],
+                        Palette::for_theme(false),
+                    ).changed;
+                });
+            });
+            assert_eq!(changed, expect_changed, "{button}");
+            if !expect_changed {
+                assert_eq!(destinations.as_slice(), std::slice::from_ref(&existing));
+                assert_eq!(source.destination_ids, [2]);
+            }
+            match button {
+                "Skapa ny destination" => draft.as_mut().unwrap().name = "Sändningssal".into(),
+                "Avbryt" => assert!(draft.is_none()),
+                _ => {}
+            }
+        }
+        assert!(draft.is_none());
+        assert_eq!(destinations.len(), 2);
+        assert_eq!(destinations[0], existing);
+        assert_eq!(destinations[1].name, "Sändningssal");
+        assert_ne!(destinations[1].id, existing.id);
+        assert_ne!(destinations[1].id, 0);
+        assert_eq!(source.destination_ids, [existing.id, destinations[1].id]);
     }
 
     #[test]
