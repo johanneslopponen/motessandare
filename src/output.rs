@@ -41,7 +41,7 @@ pub struct Output {
 }
 
 struct State {
-    status: Mutex<String>,
+    status: Mutex<OutputStatus>,
     stop: AtomicBool,
     finished: AtomicBool,
     dropped: AtomicUsize,
@@ -49,9 +49,19 @@ struct State {
     saved_file: Mutex<Option<PathBuf>>,
 }
 
+#[derive(Clone, Debug)]
+pub enum OutputStatus {
+    Progress(String),
+    Problem(String),
+}
+
 impl State {
     fn set_status(&self, text: impl Into<String>) {
-        *self.status.lock().unwrap() = text.into();
+        *self.status.lock().unwrap() = OutputStatus::Progress(text.into());
+    }
+
+    fn set_problem(&self, text: impl Into<String>) {
+        *self.status.lock().unwrap() = OutputStatus::Problem(text.into());
     }
 }
 
@@ -82,7 +92,7 @@ impl Output {
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let state = Arc::new(State {
-            status: Mutex::new("Startar…".into()),
+            status: Mutex::new(OutputStatus::Progress("Startar…".into())),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             dropped: AtomicUsize::new(0),
@@ -98,8 +108,8 @@ impl Output {
                 let _guard = guard;
                 work(receiver, worker_state);
             });
-        if let Err(error) = worker {
-            state.set_status(format!("Kunde inte starta FFmpeg-arbetaren: {error}"));
+        if worker.is_err() {
+            state.set_problem("Ljudbearbetningen kunde inte starta. Försök igen.");
         }
         Self {
             sender: Some(sender),
@@ -116,13 +126,12 @@ impl Output {
         }
     }
 
-    pub fn status(&self) -> String {
-        let status = self.state.status.lock().unwrap();
-        let dropped = self.state.dropped.load(Relaxed);
-        if dropped > 0 {
-            return format!("{status} · {dropped} tappade ljudblock");
-        }
-        status.clone()
+    pub fn status(&self) -> OutputStatus {
+        self.state.status.lock().unwrap().clone()
+    }
+
+    pub fn dropped_audio(&self) -> bool {
+        self.state.dropped.load(Relaxed) > 0
     }
 
     pub fn encoded_time(&self) -> Duration {
@@ -135,7 +144,17 @@ impl Output {
     }
 
     pub fn recording_result(&self) -> Result<PathBuf, String> {
-        self.state.saved_file.lock().unwrap().clone().ok_or_else(|| self.status())
+        self.state
+            .saved_file
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| match self.status() {
+                OutputStatus::Problem(reason) => reason,
+                OutputStatus::Progress(_) => {
+                    "Ingen sparad fil kunde bekräftas. Kontrollera inspelningsmappen.".into()
+                }
+            })
     }
 
     pub fn finished(&self) -> bool {
@@ -236,25 +255,37 @@ impl StreamTarget {
     }
 
     pub fn parse(dest: &Destination) -> Result<(Self, bool), &'static str> {
-        let mut server = Url::parse(dest.server.trim()).map_err(|_| "Ogiltig serveradress")?;
+        let mut server = Url::parse(dest.server.trim())
+            .map_err(|_| "Kontrollera serveradressen under Destinationer. Ange en adress som börjar med http:// eller https://.")?;
         let tls = match server.scheme() {
             "http" => false,
             "https" => true,
-            _ => return Err("Serveradressen måste börja med http:// eller https://"),
+            _ => return Err("Serveradressen måste börja med http:// eller https://."),
         };
-        let port = server.port_or_known_default().ok_or("Ogiltig serverport")?;
+        let port = server
+            .port_or_known_default()
+            .filter(|port| *port > 0)
+            .ok_or("Ange en serverport mellan 1 och 65535 under Destinationer.")?;
         let host = server
             .host()
-            .ok_or("Serveradressen saknar värdnamn")?
+            .ok_or("Lägg till serverns värdnamn i serveradressen under Destinationer.")?
             .to_string();
         let mount = dest.mount.trim().trim_start_matches('/');
         if mount.is_empty() || mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
-            return Err("Ogiltig monteringspunkt");
+            return Err(
+                "Kontrollera monteringspunkten under Destinationer. Ange till exempel /live.",
+            );
         }
         server.set_path(&format!("/{mount}"));
         let mount = server.path().to_owned();
         Ok((Self { host, port, mount }, tls))
     }
+}
+
+pub fn username_hint(value: &str) -> Option<&'static str> {
+    let user = value.trim();
+    (user.contains([':', '/', '?', '#', '@', '%']) || user.chars().any(char::is_whitespace))
+        .then_some("Ta bort blanksteg och tecknen : / ? # @ % från Icecast-användarnamnet.")
 }
 
 fn stream_command(
@@ -265,15 +296,15 @@ fn stream_command(
 ) -> Result<Command, &'static str> {
     let StreamTarget { host, port, mount } = target;
     let user = dest.user.trim();
-    if user.contains([':', '/', '?', '#', '@', '%']) || user.chars().any(char::is_whitespace) {
-        return Err("Icecast-användarnamnet innehåller ogiltiga tecken");
+    if let Some(reason) = username_hint(user) {
+        return Err(reason);
     }
     let user = if user.is_empty() { "source" } else { user };
     let endpoint = format!("icecast://{user}@{host}:{port}{mount}");
     let (encoder, muxer, content_type) = match dest.codec.as_str() {
         "Opus" => ("libopus", "ogg", "application/ogg"),
         "MP3" => ("libmp3lame", "mp3", "audio/mpeg"),
-        _ => return Err("Okänd sändningskodning"),
+        _ => return Err("Välj Opus eller MP3 under Kodek i destinationens inställningar."),
     };
     let mut command = ffmpeg(channels);
     if muxer == "ogg" {
@@ -302,19 +333,18 @@ fn stream_command(
 }
 
 fn run_stream(mut command: Command, mut receiver: Receiver<Vec<f32>>, state: &State) {
+    state.set_status("Ansluter…");
     while !state.stop.load(Relaxed) {
-        state.set_status("Ansluter…");
         let (returned, result) = encode(&mut command, receiver, state, "Sänder", true);
         receiver = returned;
         if state.stop.load(Relaxed) {
             return;
         }
         state.encoded_us.store(0, Relaxed);
-        if let Err(error) = result {
-            state.set_status(format!("{error} · försöker igen…"));
-        } else {
-            state.set_status("Anslutningen bröts · försöker igen…");
-        }
+        let reason = result
+            .err()
+            .unwrap_or_else(|| "Anslutningen till servern bröts.".into());
+        state.set_problem(format!("{reason} Appen försöker igen automatiskt."));
         let deadline = Instant::now() + RETRY_DELAY;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             if receiver.recv_timeout(remaining).is_err() {
@@ -347,7 +377,7 @@ fn run_record(
         "Opus" => ("libopus", "ogg", "opus"),
         "MP3" => ("libmp3lame", "mp3", "mp3"),
         _ => {
-            state.set_status("Okänt inspelningsformat");
+            state.set_problem("Välj WAV, FLAC, Opus eller MP3 under Lokal inspelning.");
             return;
         }
     };
@@ -359,7 +389,11 @@ fn run_record(
     ) {
         Ok(path) => path,
         Err(error) => {
-            state.set_status(format!("Kunde inte skapa inspelningsfilen: {error}"));
+            let hint = crate::feedback::file_hint(&error);
+            state.set_problem(format!(
+                "Kunde inte skapa inspelningsfilen i ”{}”. {hint}",
+                settings.folder
+            ));
             return;
         }
     };
@@ -392,7 +426,7 @@ fn run_record(
             if fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0) {
                 let _ = fs::remove_file(&path);
             }
-            state.set_status(format!("{error} · {filename}"));
+            state.set_problem(format!("{error} Filnamn: {filename}"));
         }
     }
 }
@@ -634,7 +668,18 @@ fn encode(
 ) -> (Receiver<Vec<f32>>, Result<(), String>) {
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return (receiver, Err(format!("Kunde inte starta FFmpeg: {error}"))),
+        Err(error) => {
+            let message = match error.kind() {
+                io::ErrorKind::NotFound => {
+                    "Ljudprogrammet FFmpeg saknas. Installera FFmpeg eller installera om Mötessändare."
+                }
+                io::ErrorKind::PermissionDenied => {
+                    "Åtkomst till ljudprogrammet FFmpeg nekades. Kontrollera att du får köra programmet."
+                }
+                _ => "Ljudprogrammet FFmpeg kunde inte starta. Kontrollera installationen.",
+            };
+            return (receiver, Err(message.into()));
+        }
     };
     let mut stdin = child.stdin.take().expect("FFmpeg stdin is piped");
     let stdout = child.stdout.take().expect("FFmpeg stdout is piped");
@@ -712,12 +757,16 @@ fn monitor(
     loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|error| format!("FFmpeg: {error}"))?
+            .map_err(|_| "Kontakten med ljudprogrammet FFmpeg bröts.")?
         {
             if status.success() {
                 return Ok(());
             }
-            return Err(format!("FFmpeg avslutades med status {status}"));
+            return Err(if network {
+                "Ljudet kunde inte skickas till Icecast. Kontrollera nätverket, serveradressen och inloggningsuppgifterna."
+            } else {
+                "Ljudet kunde inte skrivas till filen. Kontrollera ledigt utrymme och att du får skriva i inspelningsmappen."
+            }.into());
         }
         if state.stop.load(Relaxed) {
             if network {
@@ -727,7 +776,7 @@ fn monitor(
                 state.set_status("Slutför inspelningen…");
             }
             if stopping_since.get_or_insert_with(Instant::now).elapsed() > FINALIZE_TIMEOUT {
-                return Err("Tidsgränsen för att slutföra inspelningen överskreds".into());
+                return Err("Det tog för lång tid att spara klart. Kontrollera om filen i inspelningsmappen går att spela upp.".into());
             }
         }
         let current_progress = progress.load(Relaxed);
@@ -741,7 +790,7 @@ fn monitor(
         }
         if writing.load(Relaxed) {
             if stalled_since.get_or_insert_with(Instant::now).elapsed() > STALL_TIMEOUT {
-                return Err("FFmpeg tar inte längre emot ljud".into());
+                return Err("Ljudprogrammet FFmpeg har slutat ta emot ljud.".into());
             }
         } else {
             stalled_since = None;

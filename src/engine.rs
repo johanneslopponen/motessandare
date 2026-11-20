@@ -1,7 +1,7 @@
 use crate::{
     Destination, Source,
     capture::{Capture, Reader},
-    output::{self, Output, StreamTarget},
+    output::{self, Output, OutputStatus, StreamTarget},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -37,7 +37,9 @@ impl Stream {
 #[derive(Default)]
 struct Session {
     streams: Vec<Stream>,
+    stream_attempt: u64,
     recorder: Option<Output>,
+    record_attempt: u64,
     meters: [ChannelMeter; 2],
     present: bool,
 }
@@ -96,6 +98,8 @@ struct Mixer {
 struct Inputs {
     devices: Devices,
     readers: HashMap<String, Reader>,
+    issues: HashMap<String, &'static str>,
+    scan_issue: Option<&'static str>,
 }
 
 pub struct Engine {
@@ -129,6 +133,8 @@ impl Engine {
                     let snapshot = Inputs {
                         devices: capture.devices(),
                         readers: capture.readers(),
+                        issues: capture.issues.clone(),
+                        scan_issue: capture.scan_issue,
                     };
                     *inputs.lock().unwrap() = snapshot;
                     thread::sleep(Duration::from_millis(150));
@@ -166,17 +172,50 @@ impl Engine {
     pub fn devices(&self) -> Devices {
         self.inputs.lock().unwrap().devices.clone()
     }
+
+    pub fn input_hint(&self, source: &Source) -> &'static str {
+        let inputs = self.inputs.lock().unwrap();
+        if let Some(reason) = inputs
+            .issues
+            .get(&source.device)
+            .copied()
+            .or(inputs.scan_issue)
+        {
+            return reason;
+        }
+        if source.device.is_empty() {
+            return "Välj en ljudingång i ljudkällans inställningar.";
+        }
+        if let Some((_, _, channels)) = inputs
+            .devices
+            .iter()
+            .find(|(id, _, _)| id == &source.device)
+            && (source.left >= *channels || source.right.is_some_and(|right| right >= *channels))
+        {
+            return "En vald kanal saknas på ljudenheten. Välj en tillgänglig kanal i ljudkällans inställningar.";
+        }
+        "Väntar på ljudingången. Kontrollera att rätt ljudenhet är ansluten och vald."
+    }
     pub fn update(&self, sources: &[Source]) {
         let mut mixer = self.mixer.lock().unwrap();
         let Mixer {
             sessions,
             stopping_streams,
+            finalizing,
             sources: previous,
             ..
         } = &mut *mixer;
         sessions.retain(|id, session| {
             let Some(source) = sources.iter().find(|source| source.id == *id) else {
                 session.stop_streams(stopping_streams);
+                if let Some(mut recorder) = session.recorder.take() {
+                    recorder.stop();
+                    let name = previous
+                        .iter()
+                        .find(|s| s.id == *id)
+                        .map_or("Namnlös ljudkälla", Source::display_name);
+                    finalizing.push((name.to_owned(), recorder));
+                }
                 return false;
             };
             if let Some(old) = previous.iter().find(|old| old.id == *id) {
@@ -233,14 +272,16 @@ impl Engine {
         let mixer = self.mixer.lock().unwrap();
         let mut status = LiveStatus::default();
         if let Some(session) = mixer.sessions.get(&id) {
-            status.total = session.streams.len();
+            status.stream_attempt = session.stream_attempt;
+            status.record_attempt = session.record_attempt;
             for (index, stream) in session.streams.iter().enumerate() {
-                let (sending, detail) = match &stream.output {
+                let (sending, detail, audio_gap) = match &stream.output {
                     Ok(output) => (
                         !output.finished() && !output.encoded_time().is_zero(),
                         output.status(),
+                        output.dropped_audio(),
                     ),
-                    Err(error) => (false, error.clone()),
+                    Err(error) => (false, OutputStatus::Problem(error.clone()), false),
                 };
                 status.connected += usize::from(sending);
                 let name = if stream.name.is_empty() {
@@ -248,14 +289,19 @@ impl Engine {
                 } else {
                     stream.name.clone()
                 };
-                if !sending || detail != "Sänder" {
-                    status.issues.push(format!("{name} · {detail}"));
-                }
-                status.targets.push(name);
+                status.targets.push(TargetStatus {
+                    name,
+                    detail,
+                    audio_gap,
+                    sending,
+                });
             }
             if let Some(recorder) = &session.recorder {
                 status.elapsed = recorder.encoded_time();
-                status.record_detail = recorder.status();
+                if let OutputStatus::Progress(detail) = recorder.status() {
+                    status.record_detail = detail;
+                }
+                status.record_audio_gap = recorder.dropped_audio();
             }
         }
         status
@@ -264,7 +310,24 @@ impl Engine {
     pub fn completed_recordings(&self) -> Vec<(String, Result<std::path::PathBuf, String>)> {
         let mut mixer = self.mixer.lock().unwrap();
         let mut results = Vec::new();
-        mixer.finalizing.retain(|(name, output)| {
+        let Mixer {
+            sources,
+            sessions,
+            finalizing,
+            ..
+        } = &mut *mixer;
+        for source in sources {
+            if let Some(recorder) = sessions
+                .get_mut(&source.id)
+                .and_then(|session| session.recorder.take_if(|output| output.finished()))
+            {
+                results.push((
+                    source.display_name().to_owned(),
+                    recorder.recording_result(),
+                ));
+            }
+        }
+        finalizing.retain(|(name, output)| {
             if output.finished() {
                 results.push((name.clone(), output.recording_result()));
                 false
@@ -282,13 +345,18 @@ impl Engine {
     }
     pub fn set_record(&self, source: &Source, start: bool) {
         let mut m = self.mixer.lock().unwrap();
-        let s = m.sessions.entry(source.id).or_default();
-        if !start {
-            if let Some(mut recorder) = s.recorder.take() {
-                recorder.stop();
-                m.finalizing.push((source.name.clone(), recorder));
-            }
-        } else if s.recorder.as_ref().is_none_or(Output::finished) {
+        let Mixer {
+            sessions,
+            finalizing,
+            ..
+        } = &mut *m;
+        let s = sessions.entry(source.id).or_default();
+        if let Some(mut recorder) = s.recorder.take_if(|r| !start || r.finished()) {
+            recorder.stop();
+            finalizing.push((source.display_name().to_owned(), recorder));
+        }
+        if start && s.recorder.is_none() {
+            s.record_attempt += 1;
             s.recorder = Some(Output::record(
                 &source.recording,
                 &source.name,
@@ -296,26 +364,65 @@ impl Engine {
             ));
         }
     }
+
+    pub fn shutdown(&mut self) -> Vec<String> {
+        if self.stop.swap(true, Ordering::AcqRel) {
+            return Vec::new();
+        }
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        let mut mixer = self.mixer.lock().unwrap();
+        let Mixer {
+            sources,
+            sessions,
+            finalizing,
+            ..
+        } = &mut *mixer;
+        for source in sources {
+            if let Some(mut recorder) = sessions.get_mut(&source.id).and_then(|s| s.recorder.take())
+            {
+                recorder.stop();
+                finalizing.push((source.display_name().to_owned(), recorder));
+            }
+        }
+        sessions.clear();
+        let recordings = std::mem::take(finalizing);
+        drop(mixer);
+        output::wait_for_shutdown();
+        recordings
+            .into_iter()
+            .filter_map(|(name, output)| {
+                output
+                    .recording_result()
+                    .err()
+                    .map(|err| format!("{name} · {err}"))
+            })
+            .collect()
+    }
 }
 
 #[derive(Default)]
 pub struct LiveStatus {
     pub connected: usize,
-    pub total: usize,
-    pub issues: Vec<String>,
-    pub targets: Vec<String>,
+    pub stream_attempt: u64,
+    pub targets: Vec<TargetStatus>,
+    pub record_attempt: u64,
     pub elapsed: Duration,
     pub record_detail: String,
+    pub record_audio_gap: bool,
+}
+
+pub struct TargetStatus {
+    pub name: String,
+    pub detail: OutputStatus,
+    pub sending: bool,
+    pub audio_gap: bool,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
-        }
-        self.mixer.lock().unwrap().sessions.clear();
-        output::wait_for_shutdown();
+        self.shutdown();
     }
 }
 
@@ -345,6 +452,7 @@ impl Mixer {
         if session.streams.iter().any(Stream::active) {
             return;
         }
+        session.stream_attempt += 1;
 
         let mut streams = Vec::<Stream>::new();
         for dest in source.resolve_destinations(destinations) {
@@ -516,6 +624,75 @@ mod tests {
     use super::*;
     use crate::capture::tests::{feed, synthetic_reader};
 
+    fn test_engine() -> Engine {
+        Engine {
+            mixer: Arc::new(Mutex::new(Mixer::default())),
+            inputs: Arc::new(Mutex::new(Inputs::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            workers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shutdown_reports_recording_failures_after_the_main_window_closes() {
+        let mut engine = test_engine();
+        let mut source = Source {
+            name: "Stora salen".into(),
+            ..Default::default()
+        };
+        source.recording.format = "okänt".into();
+        engine.update(std::slice::from_ref(&source));
+        engine.set_record(&source, true);
+        let errors = engine.shutdown();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("Stora salen") && errors[0].contains("Lokal inspelning"));
+        assert!(engine.shutdown().is_empty());
+    }
+
+    #[test]
+    fn recording_failures_survive_a_retry_and_are_delivered_once_per_source() {
+        let engine = test_engine();
+        let mut first = Source {
+            id: 1,
+            name: "Sal A".into(),
+            ..Default::default()
+        };
+        first.recording.format = "okänt".into();
+        let second = Source {
+            id: 2,
+            name: "Sal B".into(),
+            ..first.clone()
+        };
+        engine.update(&[first.clone(), second.clone()]);
+        engine.set_record(&first, true);
+        engine.set_record(&second, true);
+        let wait_for_recorders = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while engine.recording(1) || engine.recording(2) {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for_recorders();
+        engine.set_record(&first, true);
+        wait_for_recorders();
+        let mut results = engine.completed_recordings();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["Sal A", "Sal A", "Sal B"]
+        );
+        assert!(results.iter().all(|(_, result)| {
+            result
+                .as_ref()
+                .is_err_and(|err| err.contains("Lokal inspelning"))
+        }));
+        assert!(engine.completed_recordings().is_empty());
+    }
+
     #[test]
     fn converter_preserves_fractional_phase_and_channels_across_blocks() {
         let input_rate = 32_003;
@@ -657,12 +834,7 @@ mod tests {
             ..shared.clone()
         };
         let destinations = [shared, duplicate, separate];
-        let engine = Engine {
-            mixer: Arc::new(Mutex::new(Mixer::default())),
-            inputs: Arc::new(Mutex::new(Inputs::default())),
-            stop: Arc::new(AtomicBool::new(false)),
-            workers: Vec::new(),
-        };
+        let engine = test_engine();
         engine.update(&[first.clone(), second.clone()]);
 
         engine.set_stream(&first, &destinations, true);
@@ -670,8 +842,9 @@ mod tests {
 
         assert!(engine.streaming(first.id));
         assert!(engine.streaming(second.id));
-        assert!(engine.live_status(second.id).issues.iter().any(|issue| {
-            issue == "Huvudsändning · Destinationen används redan av ljudkällan ”Mikrofon”."
+        assert!(engine.live_status(second.id).targets.iter().any(|target| {
+            target.name == "Huvudsändning" && matches!(&target.detail,
+                OutputStatus::Problem(reason) if reason == "Destinationen används redan av ljudkällan ”Mikrofon”.")
         }));
         {
             let mixer = engine.mixer.lock().unwrap();

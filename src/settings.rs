@@ -110,6 +110,14 @@ impl Default for Source {
 }
 
 impl Source {
+    pub fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            "Namnlös ljudkälla"
+        } else {
+            &self.name
+        }
+    }
+
     pub fn resolve_destinations<'a>(&self, destinations: &'a [Destination]) -> Vec<&'a Destination> {
         self.destination_ids
             .iter()
@@ -315,22 +323,31 @@ fn read_settings<T: serde::de::DeserializeOwned>(
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.to_string()),
+        Err(err) => return Err(settings_file_error(path, err)),
     };
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|_| format!("Ogiltig konfiguration. Kontrollera {}", path.display()))
+        .map_err(|_| format!("Inställningsfilen har ett ogiltigt format. Kontrollera filen ”{}” eller återställ den från en säkerhetskopia.", path.display()))
+}
+
+fn settings_file_error(path: &std::path::Path, error: std::io::Error) -> String {
+    format!(
+        "{} Inställningsfil: {}",
+        crate::feedback::file_hint(&error),
+        path.display()
+    )
 }
 
 fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
     let parent = path.parent().unwrap();
-    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|err| err.to_string())?;
-    serde_json::to_writer_pretty(&mut file, value).map_err(|err| err.to_string())?;
+    let file_error = |err| settings_file_error(path, err);
+    fs::create_dir_all(parent).map_err(file_error)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(file_error)?;
+    serde_json::to_writer_pretty(&mut file, value).map_err(|err| file_error(err.into()))?;
     file.flush()
         .and_then(|_| file.as_file().sync_all())
-        .map_err(|err| err.to_string())?;
-    file.persist(path).map_err(|err| err.error.to_string())?;
+        .map_err(file_error)?;
+    file.persist(path).map_err(|err| file_error(err.error))?;
     Ok(())
 }
 
@@ -338,7 +355,7 @@ fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), 
 mod keychain {
     use super::{
         Deserialize, Destination, RawSource, Serialize, Settings, Source, fs, migrate_raw,
-        read_settings, write_settings,
+        read_settings, settings_file_error, write_settings,
     };
     use security_framework::passwords::{
         delete_generic_password, generic_password, set_generic_password,
@@ -382,15 +399,16 @@ mod keychain {
     // Keep the same lock file across renames of sources.json. This keeps a reader
     // from using the previous reference after a writer deletes its entry.
     fn lock(path: &Path) -> Result<fs::File, String> {
-        fs::create_dir_all(path.parent().unwrap()).map_err(|err| err.to_string())?;
+        let file_error = |err| settings_file_error(path, err);
+        fs::create_dir_all(path.parent().unwrap()).map_err(file_error)?;
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(path.with_extension("lock"))
-            .map_err(|err| err.to_string())?;
-        file.lock().map_err(|err| err.to_string())?;
+            .map_err(file_error)?;
+        file.lock().map_err(file_error)?;
         Ok(file)
     }
 
@@ -430,12 +448,12 @@ mod keychain {
         if let Some(account) = raw.credential_account {
             let bytes = generic_password(SERVICE, &account).map_err(keychain_error)?;
             let passwords: StoredPasswords = serde_json::from_slice(&bytes)
-                .map_err(|_| "Nyckelringen innehåller ogiltiga lösenordsuppgifter.".to_owned())?;
+                .map_err(|_| "De sparade lösenorden i Nyckelringen kunde inte läsas. Kontrollera appens uppgifter i Nyckelhanterare.".to_owned())?;
             match passwords {
                 StoredPasswords::Global(passwords) => {
                     if passwords.len() != raw.destinations.len() {
                         return Err(
-                            "Nyckelringens lösenordsuppgifter matchar inte konfigurationen."
+                            "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut."
                                 .to_owned(),
                         );
                     }
@@ -452,7 +470,7 @@ mod keychain {
                             .any(|(source, row)| source.destinations.len() != row.len())
                     {
                         return Err(
-                            "Nyckelringens lösenordsuppgifter matchar inte konfigurationen."
+                            "De sparade lösenorden i Nyckelringen hör inte ihop med destinationerna i inställningsfilen. Kontrollera om filen har bytts ut."
                                 .to_owned(),
                         );
                     }
@@ -484,14 +502,15 @@ mod keychain {
                 .prefix("settings-")
                 .rand_bytes(24)
                 .tempfile_in(path.parent().unwrap())
-                .map_err(|err| err.to_string())?;
+                .map_err(|err| settings_file_error(path, err))?;
             let account = unique
                 .path()
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            let data = serde_json::to_vec(&passwords).map_err(|err| err.to_string())?;
+            let data = serde_json::to_vec(&passwords)
+                .map_err(|_| "Lösenorden kunde inte förberedas för Nyckelringen.")?;
             set_generic_password(SERVICE, &account, &data).map_err(keychain_error)?;
             Some(account)
         } else {
@@ -515,10 +534,8 @@ mod keychain {
         Ok(())
     }
 
-    fn keychain_error(error: security_framework::base::Error) -> String {
-        format!(
-            "Det gick inte att komma åt Nyckelringen ({error}). Kontrollera att den är upplåst och att appen har åtkomst."
-        )
+    fn keychain_error(_error: security_framework::base::Error) -> String {
+        "Det gick inte att komma åt lösenorden i Nyckelringen. Kontrollera att den är upplåst och att Mötessändare har åtkomst.".into()
     }
 }
 

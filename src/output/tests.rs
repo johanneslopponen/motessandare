@@ -242,7 +242,7 @@ fn reports_recording_folder_failure_without_returning_a_saved_path() {
         recording
             .recording_result()
             .unwrap_err()
-            .starts_with("Kunde inte skapa inspelningsfilen:")
+            .starts_with("Kunde inte skapa inspelningsfilen i ")
     );
     assert_eq!(fs::read(file).unwrap(), b"existing content");
 }
