@@ -4893,12 +4893,12 @@ fn source_card(
             return;
         }
 
-        // Standard / Compact / Wide card header
-        if compact && narrow {
+        if compact {
             ui.horizontal(|ui| {
-                let controls_w = if show_settings_button { 104.0 } else { 70.0 };
-                let ready_w = if ready { 54.0 } else { 0.0 };
-                let title_max_w = (ui.available_width() - controls_w - ready_w).max(60.0);
+                let controls_w = if show_settings_button { 114.0 } else { 74.0 };
+                let gap = ui.spacing().item_spacing.x;
+                let ready_w = if ready { 54.0 + gap } else { 0.0 };
+                let title_max_w = (ui.available_width() - controls_w - ready_w - gap).max(0.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(title_max_w, 28.0),
                     Layout::left_to_right(Align::Center),
@@ -4906,13 +4906,14 @@ fn source_card(
                         ui.add(
                             egui::Label::new(strong_text(
                                 source.display_name(),
-                                FONT_TITLE_S,
+                                if narrow { FONT_TITLE_S } else { FONT_TITLE_M },
                                 palette.text_primary,
                             ))
                             .truncate(),
                         );
                     },
                 );
+                show_ready(ui);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if show_settings_button
@@ -4939,7 +4940,6 @@ fn source_card(
                         palette,
                         &mut actions,
                     );
-                    show_ready(ui);
                 });
             });
             if streaming || recording {
@@ -4959,35 +4959,7 @@ fn source_card(
                 show_ready(ui);
                 show_activity(ui);
 
-                if compact {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        if show_settings_button
-                            && icon_button(
-                                ui,
-                                Icon::Settings,
-                                true,
-                                palette.text_secondary,
-                                false,
-                                palette,
-                                "Inställningar",
-                            )
-                            .clicked()
-                        {
-                            actions.open_settings = true;
-                        }
-                        source_output_controls(
-                            ui,
-                            source,
-                            count,
-                            streaming,
-                            recording,
-                            true,
-                            palette,
-                            &mut actions,
-                        );
-                    });
-                } else if show_settings_button {
+                if show_settings_button {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if action_button(
                             ui,
@@ -8079,6 +8051,57 @@ mod tests {
             compact_rect.height(),
             regular_rect.height()
         );
+    }
+
+    #[test]
+    fn compact_activity_pills_do_not_overlap_output_buttons() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let engine = Engine::new();
+        let source = Source {
+            name: "Tolkbåset".into(),
+            ..Source::default()
+        };
+        let palette = Palette::for_theme(true);
+        for width in [410.0, 530.0, 720.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 300.0))),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    source_card(
+                        ui, &engine, &source, &[], true, true, true, true, false, palette,
+                    );
+                });
+            });
+            let rects = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) => Some(rect),
+                _ => None,
+            });
+            let buttons: Vec<_> = rects
+                .clone()
+                .filter(|rect| rect.rect.size() == Vec2::new(34.0, 28.0) && rect.stroke.is_empty())
+                .collect();
+            let pills: Vec<_> = rects
+                .filter(|rect| {
+                    [palette.pill_bg, palette.stream_pill_bg, palette.record_pill_bg]
+                        .contains(&rect.fill)
+                })
+                .collect();
+            assert_eq!(buttons.len(), 3);
+            assert_eq!(pills.len(), 3);
+            for pill in &pills {
+                for button in &buttons {
+                    assert!(
+                        !pill.rect.intersects(button.rect),
+                        "activity pill overlaps a button at width {width}: {:?} and {:?}",
+                        pill.rect,
+                        button.rect
+                    );
+                }
+            }
+        }
     }
 
     #[test]
