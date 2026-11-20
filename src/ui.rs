@@ -4621,6 +4621,18 @@ fn source_card(
         ui.spacing_mut().item_spacing.y = if compact { 4.0 } else { 6.0 };
 
         let present = engine.present(source.id);
+        let ready = present && !streaming && !recording;
+        let show_ready = |ui: &mut EguiUi| {
+            if ready {
+                status_pill(
+                    ui,
+                    "Redo",
+                    palette.pill_bg,
+                    palette.pill_border,
+                    palette.text_secondary,
+                );
+            }
+        };
         let mut levels = engine.levels(source.id);
         if !present {
             for level in &mut levels {
@@ -4685,14 +4697,8 @@ fn source_card(
                             palette.stream_active_border,
                             palette.stream_accent,
                         );
-                    } else if present {
-                        status_pill(
-                            ui,
-                            "Redo",
-                            palette.pill_bg,
-                            palette.pill_border,
-                            palette.text_secondary,
-                        );
+                    } else {
+                        show_ready(ui);
                     }
                 });
             });
@@ -4871,9 +4877,10 @@ fn source_card(
                     );
                 });
             });
-            if streaming || recording {
+            if streaming || recording || ready {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    show_ready(ui);
                     if streaming {
                         let stream_text = if live.connected > 0 {
                             format!("Sänder · {}", format_hms(live.stream_elapsed))
@@ -4910,6 +4917,7 @@ fn source_card(
                     palette.text_primary,
                 ));
                 crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
+                show_ready(ui);
                 if streaming {
                     let stream_text = if live.connected > 0 {
                         format!("Sänder · {}", format_hms(live.stream_elapsed))
