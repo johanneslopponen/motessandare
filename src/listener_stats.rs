@@ -64,7 +64,9 @@ impl ListenerStats {
                 stats.result = Some(match pending.try_recv() {
                     Ok(result) => result,
                     Err(TryRecvError::Empty) => continue,
-                    Err(TryRecvError::Disconnected) => Err("Hämtningen avbröts".to_owned()),
+                    Err(TryRecvError::Disconnected) => {
+                        Err("Hämtningen avbröts. Välj Uppdatera för att försöka igen.".into())
+                    }
                 });
                 stats.pending = None;
             }
@@ -83,7 +85,11 @@ impl ListenerStats {
                         }
                     }) {
                     Ok(_) => stats.pending = Some(receiver),
-                    Err(_) => stats.result = Some(Err("Kunde inte starta hämtningen".to_owned())),
+                    Err(_) => {
+                        stats.result = Some(Err(
+                            "Statistiken kunde inte hämtas. Försök igen om en stund.".into(),
+                        ))
+                    }
                 }
             }
         }
@@ -112,27 +118,32 @@ fn fetch(url: &str) -> ServerResult {
     let client = reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|_| "Kunde inte starta HTTP-klienten")?;
+        .map_err(|_| "Appen kunde inte öppna en nätverksanslutning för att hämta statistiken.")?;
     let response = client.get(url).send().map_err(|error| {
         if error.is_timeout() {
-            "Servern svarade inte i tid"
+            "Icecast-servern svarade inte i tid. Försök igen om en stund."
         } else {
-            "Kunde inte ansluta till Icecast"
+            "Icecast-servern kunde inte nås. Kontrollera nätverket och serveradressen under Destinationer."
         }
     })?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Icecast returnerade HTTP {}",
-            response.status().as_u16()
-        ));
+        let code = response.status().as_u16();
+        let message = match code {
+            401 | 403 => "Servern tillåter inte att appen läser den publika lyssnarstatistiken.",
+            404 => {
+                "Statistiksidan saknas på servern. Kontrollera att adressen går till rätt Icecast-server."
+            }
+            _ => "Servern kunde inte lämna ut lyssnarstatistiken. Försök igen om en stund.",
+        };
+        return Err(format!("{message} (HTTP {code})"));
     }
     let mut body = Vec::new();
     response
         .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut body)
-        .map_err(|_| "Kunde inte läsa statistiksvaret")?;
+        .map_err(|_| "Hela statistiksvaret kunde inte läsas. Försök igen om en stund.")?;
     if body.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err("Statistiksvaret är för stort".to_owned());
+        return Err("Serverns statistiksida är för stor för att visas.".into());
     }
     parse(&body)
 }
@@ -179,7 +190,7 @@ impl Count {
 
 fn parse(body: &[u8]) -> ServerResult {
     let response: StatusResponse = serde_json::from_slice(body)
-        .map_err(|_| "Servern returnerade ogiltig Icecast-statistik")?;
+        .map_err(|_| "Serverns svar gick inte att läsa som lyssnarstatistik. Kontrollera att adressen går till rätt Icecast-server.")?;
     let streams = match response.icestats.source {
         Some(Sources::Single(stream)) => vec![stream],
         Some(Sources::Multiple(streams)) => streams,

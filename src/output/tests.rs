@@ -211,8 +211,8 @@ fn slow_icecast_handshake_preserves_startup_audio() {
     }
     let mut connection = connections
         .recv_timeout(Duration::from_secs(5))
-        .unwrap_or_else(|err| panic!("{err}: {}", output.status()));
-    assert_eq!(output.state.dropped.load(Relaxed), 0, "{}", output.status());
+        .unwrap_or_else(|err| panic!("{err}: {:?}", output.status()));
+    assert_eq!(output.state.dropped.load(Relaxed), 0, "{:?}", output.status());
     // Decode the first two seconds the server actually received (96 kbit/s).
     let mut mp3 = vec![0; 2 * 96_000 / 8];
     mp3[..3].copy_from_slice(b"ID3");
@@ -297,7 +297,7 @@ fn reports_recording_folder_failure_without_returning_a_saved_path() {
         recording
             .recording_result()
             .unwrap_err()
-            .starts_with("Kunde inte skapa inspelningsfilen:")
+            .starts_with("Kunde inte skapa inspelningsfilen i ")
     );
     assert_eq!(fs::read(file).unwrap(), b"existing content");
 }

@@ -1,3 +1,4 @@
+use crate::feedback;
 use eframe::egui;
 use std::{
     io,
@@ -37,19 +38,26 @@ impl SavedRecording {
             let label = ui.label("Filnamn").id;
             let extension = self.path.extension().unwrap_or_default().to_string_lossy();
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.name)
-                        .margin(egui::Margin::symmetric(6, 4))
-                        .desired_width(305.0),
-                )
-                .labelled_by(label);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.name)
+                            .margin(egui::Margin::symmetric(6, 4))
+                            .desired_width(305.0),
+                    )
+                    .labelled_by(label)
+                    .changed()
+                {
+                    self.error = None;
+                }
                 ui.label(format!(".{extension}"));
             });
             if let Some(folder) = self.path.parent() {
                 ui.weak(folder.display().to_string());
             }
-            if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().warn_fg_color, error);
+            if let Some(error) = &self.error
+                && feedback::message(ui, error)
+            {
+                self.error = None;
             }
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
@@ -57,15 +65,8 @@ impl SavedRecording {
                     .path
                     .file_stem()
                     .is_some_and(|stem| stem != self.name.as_str());
-                if ui
-                    .button(if changed { "Spara namn" } else { "Klar" })
-                    .clicked()
-                {
-                    if changed {
-                        self.error = self.apply_name().err().map(|error| error.to_string());
-                    } else {
-                        close = true;
-                    }
+                if changed && ui.button("Spara namn").clicked() {
+                    self.error = self.apply_name().err();
                 }
                 let reveal = if cfg!(windows) {
                     "Visa i Utforskaren"
@@ -82,8 +83,7 @@ impl SavedRecording {
                     self.error = self
                         .apply_name()
                         .and_then(|_| reveal_file(&self.path))
-                        .err()
-                        .map(|error| error.to_string());
+                        .err();
                 }
                 if changed && ui.button("Behåll namnet").clicked() {
                     self.name = self
@@ -94,12 +94,19 @@ impl SavedRecording {
                         .into_owned();
                     self.error = None;
                 }
+                if ui
+                    .button("Klar")
+                    .on_hover_text("Stäng med det senast sparade filnamnet")
+                    .clicked()
+                {
+                    close = true;
+                }
             });
         });
         close
     }
 
-    fn apply_name(&mut self) -> io::Result<()> {
+    fn apply_name(&mut self) -> Result<(), String> {
         let stem = self.name.trim();
         if self.path.file_stem().is_some_and(|current| current == stem) {
             self.name = stem.to_owned();
@@ -110,21 +117,18 @@ impl SavedRecording {
             || stem.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
             || stem.chars().any(char::is_control)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Ange ett giltigt filnamn utan sökväg.",
-            ));
+            return Err("Ange ett filnamn, till exempel Kvällsmöte. Undvik snedstreck, specialtecken och punkt på slutet.".into());
         }
         let ext = self.path.extension().unwrap_or_default().to_string_lossy();
         let target = self.path.with_file_name(format!("{stem}.{ext}"));
         rename_without_overwrite(&self.path, &target).map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "Namnet används redan. Välj ett annat namn.",
-                )
+                "Namnet används redan. Välj ett annat filnamn.".into()
             } else {
-                error
+                format!(
+                    "Filnamnet kunde inte ändras. {}",
+                    feedback::file_hint(&error)
+                )
             }
         })?;
         self.path = target;
@@ -163,20 +167,33 @@ fn rename_without_overwrite(from: &Path, to: &Path) -> io::Result<()> {
     original.persist_noclobber(to).map_err(|e| e.error)
 }
 
-fn reveal_file(path: &Path) -> io::Result<()> {
+fn reveal_file(path: &Path) -> Result<(), String> {
+    std::fs::metadata(path).map_err(|err| {
+        format!(
+            "Inspelningen kunde inte visas. {}",
+            feedback::file_hint(&err)
+        )
+    })?;
+    let open_error = |_| "Filhanteraren kunde inte öppnas. Öppna mappen som visas ovan.".to_owned();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         Command::new("explorer.exe")
             .raw_arg(format!("/select,\"{}\"", path.display()))
-            .spawn()?;
+            .spawn()
+            .map_err(open_error)?;
     }
     #[cfg(target_os = "macos")]
-    Command::new("open").arg("-R").arg(path).spawn()?;
+    Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map_err(open_error)?;
     #[cfg(all(unix, not(target_os = "macos")))]
     Command::new("xdg-open")
         .arg(path.parent().unwrap_or(path))
-        .spawn()?;
+        .spawn()
+        .map_err(open_error)?;
     Ok(())
 }
 

@@ -17,6 +17,8 @@ pub struct Capture {
     streams: BTreeMap<String, InputStream>,
     last_scan: Option<Instant>,
     retry_after: BTreeMap<String, Instant>,
+    pub issues: HashMap<String, &'static str>,
+    pub scan_issue: Option<&'static str>,
 }
 
 struct InputDevice {
@@ -58,6 +60,8 @@ impl Capture {
             streams: BTreeMap::new(),
             last_scan: None,
             retry_after: BTreeMap::new(),
+            issues: HashMap::new(),
+            scan_issue: None,
         }
     }
 
@@ -76,9 +80,11 @@ impl Capture {
 
     pub fn tick(&mut self, wanted: &[String]) {
         let now = Instant::now();
+        self.issues.retain(|id, _| wanted.contains(id));
         self.streams.retain(|id, stream| {
             if stream.received_samples.swap(false, Ordering::Relaxed) {
                 stream.last_data = now;
+                self.issues.remove(id);
             }
             if !wanted.contains(id) {
                 return false;
@@ -86,6 +92,10 @@ impl Capture {
             if stream.failed.load(Ordering::Relaxed)
                 || now.duration_since(stream.last_data) >= STALL_TIMEOUT
             {
+                self.issues.insert(
+                    id.clone(),
+                    "Ljudingången slutade lämna ljud. Appen försöker ansluta igen.",
+                );
                 self.retry_after.insert(id.clone(), now + POLL_INTERVAL);
                 return false;
             }
@@ -114,10 +124,8 @@ impl Capture {
                     self.streams.insert(id.clone(), stream);
                 }
                 Err(error) => {
-                    eprintln!(
-                        "Kunde inte öppna ljudingången {} ({id}): {error}",
-                        input.name
-                    );
+                    self.issues
+                        .insert(id.clone(), input_error_hint(error.kind()));
                     self.retry_after.insert(id.clone(), now + STALL_TIMEOUT);
                 }
             }
@@ -125,9 +133,14 @@ impl Capture {
     }
 
     fn scan(&mut self) {
-        let Ok(devices) = self.host.devices() else {
-            return;
+        let devices = match self.host.devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                self.scan_issue = Some(input_error_hint(error.kind()));
+                return;
+            }
         };
+        self.scan_issue = None;
 
         let mut found = BTreeMap::new();
         for device in devices {
@@ -169,6 +182,7 @@ impl Capture {
         }
 
         self.streams.retain(|id, _| found.contains_key(id));
+        self.issues.retain(|id, _| found.contains_key(id));
         self.devices = found;
     }
 
@@ -177,6 +191,24 @@ impl Capture {
             .iter()
             .map(|(id, stream)| (id.clone(), stream.reader.clone()))
             .collect()
+    }
+}
+
+fn input_error_hint(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::PermissionDenied => {
+            "Ge Mötessändare åtkomst till mikrofonen i datorns integritetsinställningar."
+        }
+        ErrorKind::DeviceBusy => "Ljudingången är upptagen. Stäng andra program som använder den.",
+        ErrorKind::UnsupportedConfig | ErrorKind::InvalidInput => {
+            "Ljudenhetens format stöds inte. Kontrollera enhetens ljudinställningar."
+        }
+        ErrorKind::DeviceNotAvailable => {
+            "Ljudenheten är frånkopplad. Anslut den igen eller välj en annan ljudingång."
+        }
+        _ => {
+            "Datorns ljudingång kunde inte öppnas. Kontrollera enhetens anslutning och datorns ljudinställningar."
+        }
     }
 }
 
