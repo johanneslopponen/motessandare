@@ -4918,6 +4918,7 @@ fn source_card(
                     palette.text_primary,
                 ));
                 crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
+                show_ready(ui);
                 if streaming {
                     let stream_text = if live.connected > 0 {
                         format!("Sänder · {}", format_hms(live.stream_elapsed))
@@ -4972,11 +4973,10 @@ fn source_card(
                             palette,
                             &mut actions,
                         );
-                        show_ready(ui);
                     });
-                } else if show_settings_button || ready {
+                } else if show_settings_button {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if show_settings_button && action_button(
+                        if action_button(
                             ui,
                             Icon::Settings,
                             "Inställningar",
@@ -4989,7 +4989,6 @@ fn source_card(
                         {
                             actions.open_settings = true;
                         }
-                        show_ready(ui);
                     });
                 }
             });
