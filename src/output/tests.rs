@@ -2,7 +2,7 @@ use super::*;
 use std::{
     f32::consts::TAU,
     io::Read,
-    net::{Shutdown, TcpListener},
+    net::{TcpListener, TcpStream},
 };
 
 fn tone(amplitude: f32) -> Vec<f32> {
@@ -11,12 +11,32 @@ fn tone(amplitude: f32) -> Vec<f32> {
         .collect()
 }
 
+fn decode_audio(path: &Path) -> Vec<f32> {
+    let decoded = Command::new(ffmpeg_path())
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+        .output()
+        .unwrap();
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    decoded
+        .stdout
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
 fn stream_receiver(
     mount: &'static str,
     content_type: &'static str,
     magic: &'static [u8],
     attempts: usize,
-) -> (Destination, Receiver<()>) {
+    handshake_delay: Duration,
+) -> (Destination, Receiver<BufReader<TcpStream>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (received, updates) = mpsc::channel();
@@ -51,6 +71,7 @@ fn stream_receiver(
                 header("authorization"),
                 Some("Basic dGVzdC1zb3VyY2U6dGVzdC1zZWNyZXQ=")
             );
+            thread::sleep(handshake_delay);
             stream
                 .get_mut()
                 .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -58,8 +79,7 @@ fn stream_receiver(
             let mut first_bytes = vec![0; magic.len()];
             stream.read_exact(&mut first_bytes).unwrap();
             assert_eq!(first_bytes, magic);
-            stream.get_ref().shutdown(Shutdown::Both).unwrap();
-            received.send(()).unwrap();
+            received.send(stream).unwrap();
         }
     });
     (
@@ -85,8 +105,10 @@ fn stream_receiver(
 #[test]
 #[ignore = "requires FFmpeg with libopus/libmp3lame and local TCP access"]
 fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
-    let (opus_dest, opus_updates) = stream_receiver("/first.opus", "application/ogg", b"OggS", 2);
-    let (mp3_dest, mp3_updates) = stream_receiver("/second.mp3", "audio/mpeg", b"ID3", 1);
+    let (opus_dest, opus_updates) =
+        stream_receiver("/first.opus", "application/ogg", b"OggS", 2, Duration::ZERO);
+    let (mp3_dest, mp3_updates) =
+        stream_receiver("/second.mp3", "audio/mpeg", b"ID3", 1, Duration::ZERO);
     let streams = [&opus_dest, &mp3_dest].map(|dest| {
         let (target, tls) = StreamTarget::parse(dest).unwrap();
         Output::stream(dest, 1, &target, tls).unwrap()
@@ -150,30 +172,63 @@ fn records_four_formats_and_reconnects_without_interrupting_other_outputs() {
             .iter()
             .find(|path| path.extension().unwrap() == extension.as_str())
             .unwrap();
-        let decoded = Command::new(ffmpeg_path())
-            .args(["-v", "error", "-i"])
-            .arg(path)
-            .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
-            .output()
-            .unwrap();
-        assert!(
-            decoded.status.success(),
-            "{}",
-            String::from_utf8_lossy(&decoded.stderr)
-        );
-        assert!(decoded.stdout.len() >= 48_000 * 4, "{format} is too short");
-        let samples = decoded
-            .stdout
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()));
-        let count = samples.len();
-        let rms = (samples.map(|sample| sample * sample).sum::<f32>() / count as f32).sqrt();
+        let samples = decode_audio(path);
+        assert!(samples.len() >= 48_000, "{format} is too short");
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
         let expected = (index + 1) as f32 * 0.12 / 2_f32.sqrt();
         assert!(
             (rms - expected).abs() < 0.03,
             "{format}: {rms} vs {expected}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires FFmpeg with libmp3lame and local TCP access"]
+fn slow_icecast_handshake_preserves_startup_audio() {
+    let (dest, connections) = stream_receiver(
+        "/slow.mp3",
+        "audio/mpeg",
+        b"ID3",
+        1,
+        Duration::from_millis(1500),
+    );
+    let (target, tls) = StreamTarget::parse(&dest).unwrap();
+    let output = Output::stream(&dest, 2, &target, tls).unwrap();
+    let tone = tone(0.25); // 480 stereo frames per mixer tick
+    let silence = vec![0.; tone.len()];
+    let start = Instant::now();
+    for tick in 0..300 {
+        // The only tone plays from 750 ms to 1 s, while the handshake is pending.
+        let block = if (75..100).contains(&tick) {
+            &tone
+        } else {
+            &silence
+        };
+        output.push(block);
+        let next = start + BLOCK_DURATION * (tick + 1);
+        thread::sleep(next.saturating_duration_since(Instant::now()));
+    }
+    let mut connection = connections
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|err| panic!("{err}: {:?}", output.status()));
+    assert_eq!(output.state.dropped.load(Relaxed), 0, "{:?}", output.status());
+    // Decode the first two seconds the server actually received (96 kbit/s).
+    let mut mp3 = vec![0; 2 * 96_000 / 8];
+    mp3[..3].copy_from_slice(b"ID3");
+    connection.read_exact(&mut mp3[3..]).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("received.mp3");
+    fs::write(&path, mp3).unwrap();
+    let last_loud_frame = decode_audio(&path)
+        .chunks_exact(2)
+        .rposition(|frame| frame[0].abs() > 0.1)
+        .expect("the tone played during the handshake should be audible");
+    // Allow 50 ms for MP3 encoder delay.
+    assert!(
+        last_loud_frame.abs_diff(48_000) < 2400,
+        "tone ended at frame {last_loud_frame}"
+    );
 }
 
 #[test]
@@ -242,7 +297,7 @@ fn reports_recording_folder_failure_without_returning_a_saved_path() {
         recording
             .recording_result()
             .unwrap_err()
-            .starts_with("Kunde inte skapa inspelningsfilen:")
+            .starts_with("Kunde inte skapa inspelningsfilen i ")
     );
     assert_eq!(fs::read(file).unwrap(), b"existing content");
 }
@@ -270,20 +325,9 @@ fn finalizes_queued_stereo_audio_and_reports_its_full_duration() {
     assert!(recording.finished());
     let path = recording.recording_result().unwrap();
 
-    let decoded = Command::new(ffmpeg_path())
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
-        .output()
-        .unwrap();
-    assert!(
-        decoded.status.success(),
-        "{}",
-        String::from_utf8_lossy(&decoded.stderr)
-    );
-    assert_eq!(decoded.stdout.len(), 12 * input.len() * size_of::<f32>());
-    for (bytes, expected) in decoded.stdout.chunks_exact(4).zip(input.iter().cycle()) {
-        let actual = f32::from_le_bytes(bytes.try_into().unwrap());
+    let decoded = decode_audio(&path);
+    assert_eq!(decoded.len(), 12 * input.len());
+    for (actual, expected) in decoded.iter().zip(input.iter().cycle()) {
         assert!((actual - expected).abs() < 1e-6);
     }
     let reported = recording.encoded_time();

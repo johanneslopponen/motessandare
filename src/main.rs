@@ -2,6 +2,7 @@
 
 mod capture;
 mod engine;
+mod feedback;
 mod guide;
 mod listener_stats;
 mod output;
@@ -27,11 +28,19 @@ fn main() -> eframe::Result {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Mötessändare",
         options,
         Box::new(|cc| Ok(Box::new(ui::Ui::new(&cc.egui_ctx)))),
-    )
+    );
+    if result.is_err() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Mötessändare kunde inte öppna fönstret")
+            .set_description("Starta om appen. Om problemet kvarstår, kontrollera datorns skärm- och grafikinställningar.")
+            .show();
+    }
+    result
 }
 
 #[cfg(test)]

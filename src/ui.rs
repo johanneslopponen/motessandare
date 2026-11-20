@@ -1,7 +1,9 @@
 use crate::engine::MeterLevel;
+use crate::feedback;
 use crate::listener_stats::{
     ConnectionProbeStatus, ConnectionTester, ListenerStats, MountStatus, StatsTarget,
 };
+use crate::output::OutputStatus;
 use crate::settings::ThemePreference;
 use crate::{Destination, Engine, Settings, Source, settings_load, settings_save};
 use eframe::egui::{
@@ -225,7 +227,6 @@ enum Icon {
     Check,
     Back,
     Close,
-    Warning,
     Lock,
     Refresh,
     ChevronRight,
@@ -325,6 +326,7 @@ impl SaveState {
 
 pub struct Ui {
     saved_recordings: VecDeque<crate::recording_dialog::SavedRecording>,
+    recording_errors: VecDeque<String>,
     engine: Engine,
     settings: Settings,
     selected_source: Option<u64>,
@@ -337,13 +339,13 @@ pub struct Ui {
     activity_log: VecDeque<ActivityEvent>,
     last_logged_issues: HashMap<u64, Vec<String>>,
     save_state: SaveState,
-    notice: Option<String>,
+    hidden_settings_error: Option<String>,
     new_destination_draft: Option<Destination>,
     confirm_stop: Option<StopConfirm>,
     app_icon: Option<TextureHandle>,
     close_blocked: bool,
     close_confirmed: bool,
-    load_blocked: bool,
+    load_error: Option<String>,
 }
 
 impl Ui {
@@ -362,15 +364,11 @@ impl Ui {
 
         let app_icon = load_app_icon_texture(ctx);
 
-        let (settings, notice) = match settings_load() {
+        let (settings, load_error) = match settings_load() {
             Ok(settings) => (settings, None),
-            Err(err) => (
-                Settings::default(),
-                Some(format!("Inställningarna kunde inte läsas. {err}")),
-            ),
+            Err(err) => (Settings::default(), Some(err)),
         };
         apply_theme_preference(ctx, settings.theme);
-        let load_blocked = notice.is_some();
         let engine = Engine::new();
         engine.update(&settings.sources);
         let selected_source = settings.sources.first().map(|source| source.id);
@@ -392,13 +390,14 @@ impl Ui {
             last_logged_issues: HashMap::new(),
             save_state: SaveState::Idle,
             saved_recordings: Default::default(),
-            notice,
+            recording_errors: VecDeque::new(),
+            hidden_settings_error: None,
             new_destination_draft: None,
             confirm_stop: None,
             app_icon,
             close_blocked: false,
             close_confirmed: false,
-            load_blocked,
+            load_error,
         }
     }
 
@@ -434,13 +433,21 @@ impl Ui {
             .retain(|id, _| active_ids.contains(id));
         for source in &self.settings.sources {
             let live = self.engine.live_status(source.id);
+            let issues: Vec<String> = live
+                .targets
+                .iter()
+                .filter_map(|target| match &target.detail {
+                    OutputStatus::Problem(reason) => Some(format!("{} · {reason}", target.name)),
+                    OutputStatus::Progress(_) => None,
+                })
+                .collect();
             let prev = self.last_logged_issues.entry(source.id).or_default();
-            for issue in &live.issues {
+            for issue in &issues {
                 if !prev.contains(issue) {
-                    newly_reported.push(format!("{} · {issue}", display_name(source)));
+                    newly_reported.push(format!("{} · {issue}", source.display_name()));
                 }
             }
-            *prev = live.issues;
+            *prev = issues;
         }
         for message in newly_reported {
             self.log_event(EventSeverity::Warning, message);
@@ -451,7 +458,7 @@ impl Ui {
         let Some(source) = self.settings.sources.iter().find(|s| s.id == source_id) else {
             return;
         };
-        let name = display_name(source).to_owned();
+        let name = source.display_name().to_owned();
         self.engine
             .set_stream(source, &self.settings.destinations, start);
         self.log_event(
@@ -468,7 +475,7 @@ impl Ui {
         let Some(source) = self.settings.sources.iter().find(|s| s.id == source_id) else {
             return;
         };
-        let name = display_name(source).to_owned();
+        let name = source.display_name().to_owned();
         let format = source.recording.format.clone();
         self.engine.set_record(source, start);
         self.log_event(
@@ -482,7 +489,7 @@ impl Ui {
     }
 
     fn add_source(&mut self) {
-        if self.load_blocked {
+        if self.load_error.is_some() {
             return;
         }
         let id = self.settings.next_source_id();
@@ -498,7 +505,7 @@ impl Ui {
     }
 
     fn add_destination(&mut self) {
-        if self.load_blocked {
+        if self.load_error.is_some() {
             return;
         }
         let id = self.settings.next_destination_id();
@@ -514,7 +521,7 @@ impl Ui {
 
     fn delete_source(&mut self, index: usize) {
         let source = self.settings.sources.remove(index);
-        let label = format!("Ljudkälla ”{}” borttagen", display_name(&source));
+        let label = format!("Ljudkälla ”{}” borttagen", source.display_name());
         self.selected_source = self
             .settings
             .sources
@@ -960,7 +967,7 @@ impl Ui {
                                         );
                                         ui.add(
                                             egui::Label::new(strong_text(
-                                                display_name(source),
+                                                source.display_name(),
                                                 FONT_BODY,
                                                 palette.text_primary,
                                             ))
@@ -1079,7 +1086,7 @@ impl Ui {
                     palette.text_primary,
                 ));
                 ui.label(
-                    RichText::new(display_name(&source))
+                    RichText::new(source.display_name())
                         .size(FONT_CAPTION)
                         .color(palette.text_secondary),
                 );
@@ -1196,7 +1203,7 @@ impl Ui {
                         {
                             let dest = &self.settings.destinations[pos];
                             let target_status = live
-                                .target_statuses
+                                .targets
                                 .iter()
                                 .find(|ts| ts.name == dest.display_name());
                             let listener_text = targets
@@ -1209,12 +1216,17 @@ impl Ui {
                                 .map(|n| format!(" · {n} lyssnare"))
                                 .unwrap_or_default();
                             let (dot, bg, border, fg) = match target_status {
-                                Some(ts) if ts.connected => (
-                                    palette.stream_accent,
-                                    palette.stream_pill_bg,
-                                    palette.stream_active_border,
-                                    palette.stream_accent,
-                                ),
+                                Some(ts)
+                                    if ts.sending
+                                        && matches!(ts.detail, OutputStatus::Progress(_)) =>
+                                {
+                                    (
+                                        palette.stream_accent,
+                                        palette.stream_pill_bg,
+                                        palette.stream_active_border,
+                                        palette.stream_accent,
+                                    )
+                                }
                                 Some(_) => (
                                     palette.warning,
                                     palette.warn_pill_bg,
@@ -1323,6 +1335,7 @@ impl Ui {
         match settings_save(&self.settings) {
             Ok(()) => {
                 self.close_blocked = false;
+                self.hidden_settings_error = None;
                 self.save_state = SaveState::Saved(Instant::now());
             }
             Err(err) => self.save_state = SaveState::Failed(err),
@@ -1606,7 +1619,7 @@ impl Ui {
                 if icon_button(
                     ui,
                     Icon::ListenerStats,
-                    !self.load_blocked,
+                    self.load_error.is_none(),
                     palette.text_secondary,
                     showing_stats,
                     palette,
@@ -1697,7 +1710,7 @@ impl Ui {
                             let showing_stats = self.view == View::ListenerStats;
                             if ui
                                 .add_enabled(
-                                    !self.load_blocked,
+                                    self.load_error.is_none(),
                                     egui::SelectableLabel::new(showing_stats, "Lyssnarstatistik"),
                                 )
                                 .clicked()
@@ -1848,56 +1861,22 @@ impl Ui {
             }
         }
 
-        if let Some(message) = self.notice.clone() {
+        if !self.recording_errors.is_empty() || matches!(self.save_state, SaveState::Failed(_)) {
             ui.add_space(SPACE_M);
-            let mut dismiss = false;
-            let mut reload = false;
-            let is_error = self.load_blocked;
-            severity_banner(ui, is_error, &message, palette, |ui| {
-                if self.load_blocked
-                    && compact_button(ui, "Läs in igen", true, None, palette).clicked()
-                {
-                    reload = true;
-                }
-                if !self.load_blocked
-                    && icon_button(
-                        ui,
-                        Icon::Close,
-                        true,
-                        palette.text_secondary,
-                        false,
-                        palette,
-                        "Stäng meddelande",
-                    )
-                    .clicked()
-                {
-                    dismiss = true;
-                }
-            });
-            if reload {
-                match settings_load() {
-                    Ok(settings) => {
-                        apply_theme_preference(ui.ctx(), settings.theme);
-                        self.selected_source = settings.sources.first().map(|source| source.id);
-                        self.settings = settings;
-                        self.engine.update(&self.settings.sources);
-                        self.load_blocked = false;
-                        self.notice = None;
-                    }
-                    Err(err) => {
-                        self.notice = Some(format!("Inställningarna kunde inte läsas. {err}"));
-                    }
-                }
-            } else if dismiss {
-                self.notice = None;
-            }
+            ScrollArea::vertical()
+                .id_salt("app-errors")
+                .max_height(ui.ctx().screen_rect().height() * 0.30)
+                .show(ui, |ui| self.app_errors(ui, palette));
         }
+    }
+
+    fn app_errors(&mut self, ui: &mut EguiUi, palette: Palette) {
         if let SaveState::Failed(error) = &self.save_state {
-            let message = format!("Inställningarna kunde inte sparas. {error}");
-            ui.add_space(SPACE_M);
+            ui.strong("Inställningarna kunde inte sparas");
+            settings_error_detail(ui, error, &mut self.hidden_settings_error);
             let mut retry = false;
             let mut close_without_save = false;
-            severity_banner(ui, true, &message, palette, |ui| {
+            ui.horizontal_wrapped(|ui| {
                 if compact_button(ui, "Försök igen", true, None, palette).clicked() {
                     retry = true;
                 }
@@ -1908,6 +1887,7 @@ impl Ui {
                 }
             });
             if retry {
+                self.hidden_settings_error = None;
                 self.save();
             } else if close_without_save {
                 if self.has_active_outputs() {
@@ -1917,6 +1897,58 @@ impl Ui {
                 } else {
                     self.save_state = SaveState::Idle;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if let Some(error) = self.recording_errors.front() {
+            let count = self.recording_errors.len();
+            if count > 1 {
+                ui.strong(format!("Inspelningsfel (1 av {count})"));
+            }
+            if feedback::message(ui, error) {
+                self.recording_errors.pop_front();
+            }
+        }
+    }
+
+    fn load_error_page(&mut self, ui: &mut EguiUi) {
+        ui.heading("Inställningarna kunde inte läsas in");
+        ui.label("När inställningarna har lästs in kan du använda dina ljudkällor igen.");
+        if let Some(error) = &self.load_error {
+            settings_error_detail(ui, error, &mut self.hidden_settings_error);
+        }
+        if ui.button("Läs in igen").clicked() {
+            self.hidden_settings_error = None;
+            match settings_load() {
+                Ok(settings) => {
+                    apply_theme_preference(ui.ctx(), settings.theme);
+                    self.selected_source = settings.sources.first().map(|source| source.id);
+                    self.settings = settings;
+                    self.engine.update(&self.settings.sources);
+                    self.load_error = None;
+                }
+                Err(error) => {
+                    self.load_error = Some(error);
+                }
+            }
+        }
+    }
+
+    fn collect_recordings(&mut self) {
+        for (source, result) in self.engine.completed_recordings() {
+            match result {
+                Ok(path) => {
+                    self.log_event(
+                        EventSeverity::Record,
+                        format!("Inspelning sparad ({source})"),
+                    );
+                    self.saved_recordings
+                        .push_back(crate::recording_dialog::SavedRecording::new(source, path));
+                }
+                Err(error) => {
+                    let msg = format!("Inspelningen för {source} misslyckades. {error}");
+                    self.log_event(EventSeverity::Warning, msg.clone());
+                    self.recording_errors.push_back(msg);
                 }
             }
         }
@@ -1931,6 +1963,17 @@ impl Ui {
 }
 
 impl eframe::App for Ui {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let errors = self.engine.shutdown();
+        if !errors.is_empty() {
+            rfd::MessageDialog::new()
+                .set_title("Fel när inspelningen skulle sparas")
+                .set_description(errors.join("\n\n"))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+        }
+    }
+
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let palette = Palette::for_theme(ctx.style().visuals.dark_mode);
         let screen_width = ctx.screen_rect().width();
@@ -1939,10 +1982,15 @@ impl eframe::App for Ui {
         self.connection_tester.poll();
         self.sync_issue_events();
 
-        if !self.load_blocked {
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        if !closing {
+            self.collect_recordings();
+        }
+        if self.load_error.is_none() {
             if ctx.input_mut(|input| input.consume_shortcut(&SAVE_SHORTCUT))
                 && self.save_state.dirty()
             {
+                self.hidden_settings_error = None;
                 self.save();
             }
             if ctx.input_mut(|input| input.consume_shortcut(&NEW_SOURCE_SHORTCUT)) {
@@ -1964,15 +2012,15 @@ impl eframe::App for Ui {
                 self.header(ui, mode, palette);
             });
 
-        let show_wide_live_panel = !self.load_blocked
+        let show_wide_live_panel = self.load_error.is_none()
             && self.view == View::Overview
             && mode == LayoutMode::Wide
             && !self.settings.sources.is_empty();
-        let show_master_rail = !self.load_blocked
+        let show_master_rail = self.load_error.is_none()
             && self.view == View::SourceSettings
             && screen_width >= MASTER_DETAIL_LEFT_WIDTH
             && !self.settings.sources.is_empty();
-        let show_live_control_panel = !self.load_blocked
+        let show_live_control_panel = self.load_error.is_none()
             && self.view == View::SourceSettings
             && screen_width >= MASTER_DETAIL_RIGHT_WIDTH
             && self.selected_source.is_some();
@@ -1997,7 +2045,8 @@ impl eframe::App for Ui {
                     )),
             )
             .show(ctx, |ui| {
-                if self.load_blocked {
+                if self.load_error.is_some() {
+                    ScrollArea::vertical().show(ui, |ui| self.load_error_page(ui));
                     return;
                 }
 
@@ -2014,7 +2063,7 @@ impl eframe::App for Ui {
                             .sources
                             .iter()
                             .find(|s| Some(s.id) == self.selected_source)
-                            .map(|s| display_name(s).to_owned())
+                            .map(|s| s.display_name().to_owned())
                             .unwrap_or_else(|| "Ljudkälla".to_owned());
                         if action_button(
                             ui,
@@ -2474,7 +2523,7 @@ impl eframe::App for Ui {
                                             .sources
                                             .iter()
                                             .filter(|source| source.destination_ids.contains(&dest_id))
-                                            .map(|source| display_name(source).to_owned())
+                                            .map(|source| source.display_name().to_owned())
                                             .collect();
                                         let in_use_streaming = self.destination_streaming(dest_id);
                                         let expanded = self.expanded_destinations.contains(&dest_id);
@@ -2644,24 +2693,6 @@ impl eframe::App for Ui {
                 }
             });
 
-        for (source, result) in self.engine.completed_recordings() {
-            match result {
-                Ok(path) => {
-                    self.log_event(
-                        EventSeverity::Record,
-                        format!("Inspelning sparad ({source})"),
-                    );
-                    self.saved_recordings
-                        .push_back(crate::recording_dialog::SavedRecording::new(source, path));
-                }
-                Err(error) => {
-                    let msg = format!("Kunde inte slutföra inspelningen för {source}. {error}");
-                    self.log_event(EventSeverity::Warning, msg.clone());
-                    self.notice = Some(msg);
-                }
-            }
-        }
-        let closing = ctx.input(|input| input.viewport().close_requested());
         let guard_close =
             closing && guard_active_close(ctx, self.close_confirmed, self.has_active_outputs());
         if guard_close {
@@ -2684,6 +2715,7 @@ impl eframe::App for Ui {
         if self.save_state.due(now) || (closing && self.save_state.dirty()) {
             self.save();
             if closing && self.save_state.dirty() {
+                self.hidden_settings_error = None;
                 self.close_confirmed = false;
                 self.close_blocked = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -2711,6 +2743,17 @@ impl eframe::App for Ui {
             _ => {}
         }
         ctx.request_repaint_after(repaint_after);
+    }
+}
+
+fn settings_error_detail(ui: &mut EguiUi, error: &str, hidden: &mut Option<String>) {
+    if hidden.as_deref() != Some(error) {
+        *hidden = None;
+        if feedback::message(ui, error) {
+            *hidden = Some(error.to_owned());
+        }
+    } else if ui.small_button("Visa felmeddelandet").clicked() {
+        *hidden = None;
     }
 }
 
@@ -2778,20 +2821,23 @@ fn listener_stats_page(
                         15.0,
                         palette.text_primary,
                     ));
+                    let issue_id = egui::Id::new(("stats-error", destination.id));
                     let target = match target {
                         Ok(target) => target,
                         Err(error) => {
-                            ui.colored_label(palette.warning, *error);
+                            ui.weak("Statistik saknas");
+                            feedback::condition(ui, issue_id, Some(error));
                             return;
                         }
                     };
                     ui.weak(format!("{}{}", target.server, target.mount));
-                    match stats.status(target) {
+                    let status = stats.status(target);
+                    match &status {
                         MountStatus::Loading => {
                             ui.weak("Hämtar statistik…");
                         }
-                        MountStatus::Unavailable(error) => {
-                            ui.colored_label(palette.warning, error);
+                        MountStatus::Unavailable(_) => {
+                            ui.weak("Statistik saknas");
                         }
                         MountStatus::Absent => {
                             ui.weak("Monteringspunkten visas inte i serverns statistik.");
@@ -2817,6 +2863,11 @@ fn listener_stats_page(
                             });
                         }
                     }
+                    let reason = match status {
+                        MountStatus::Unavailable(error) => Some(error),
+                        _ => None,
+                    };
+                    feedback::condition(ui, issue_id, reason);
                 });
             }
         });
@@ -3157,23 +3208,6 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 stroke,
             );
         }
-        Icon::Warning => {
-            let stroke = Stroke::new(1.5, color);
-            let tri = vec![
-                Pos2::new(c.x, c.y - r * 0.82),
-                Pos2::new(c.x + r * 0.86, c.y + r * 0.72),
-                Pos2::new(c.x - r * 0.86, c.y + r * 0.72),
-            ];
-            painter.add(Shape::closed_line(tri, stroke));
-            painter.line_segment(
-                [
-                    Pos2::new(c.x, c.y - r * 0.28),
-                    Pos2::new(c.x, c.y + r * 0.22),
-                ],
-                Stroke::new(1.6, color),
-            );
-            painter.circle_filled(Pos2::new(c.x, c.y + r * 0.48), (r * 0.12).max(1.1), color);
-        }
         Icon::Lock => {
             let body = Rect::from_min_max(
                 Pos2::new(c.x - r * 0.64, c.y - r * 0.08),
@@ -3366,49 +3400,6 @@ fn format_dbfs(signal: f32) -> String {
     }
 }
 
-fn severity_banner(
-    ui: &mut EguiUi,
-    is_error: bool,
-    message: &str,
-    palette: Palette,
-    actions: impl FnOnce(&mut EguiUi),
-) {
-    let (bg, border, accent) = if is_error {
-        (
-            palette.danger_pill_bg,
-            palette.danger_pill_border,
-            palette.danger,
-        )
-    } else {
-        (
-            palette.warn_pill_bg,
-            palette.warn_pill_border,
-            palette.warning,
-        )
-    };
-    Frame::new()
-        .fill(bg)
-        .stroke(Stroke::new(1.0, border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 7))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                paint_icon(ui.painter(), icon_rect, Icon::Warning, accent);
-                ui.label(
-                    RichText::new(message)
-                        .size(FONT_BODY)
-                        .color(palette.text_primary),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    actions(ui);
-                });
-            });
-        });
-}
-
 fn lock_badge(ui: &mut EguiUi, text: &str, palette: Palette) {
     Frame::new()
         .fill(palette.warn_pill_bg)
@@ -3477,8 +3468,56 @@ fn wrapping_dot_pill(
         });
 }
 
+fn dismissible_dot_pill(
+    ui: &mut EguiUi,
+    id: egui::Id,
+    text: Option<&str>,
+    dot_color: Color32,
+    bg: Color32,
+    border: Color32,
+    fg: Color32,
+) {
+    feedback::show_if_needed(ui, id, text, |ui, message| {
+        Frame::new()
+            .fill(bg)
+            .stroke(Stroke::new(1.0, border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(8, 3))
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                        let dismissed = ui
+                            .add(
+                                egui::Button::new(RichText::new("Dölj").size(11.0).color(fg))
+                                    .frame(false),
+                            )
+                            .on_hover_text("Dölj meddelandet")
+                            .clicked();
+                        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(7.0, 14.0), Sense::hover());
+                            ui.painter().circle_filled(dot_rect.center(), 3.2, dot_color);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(message).size(FONT_CAPTION).color(fg),
+                                )
+                                .wrap(),
+                            );
+                        });
+                        dismissed
+                    })
+                    .inner
+                })
+                .inner
+            })
+            .inner
+    });
+}
+
 fn source_status_notices(
     ui: &mut EguiUi,
+    engine: &Engine,
     source: &Source,
     present: bool,
     streaming: bool,
@@ -3486,40 +3525,48 @@ fn source_status_notices(
     live: &crate::engine::LiveStatus,
     palette: Palette,
 ) {
-    let has_connected = live.target_statuses.iter().any(|t| t.connected);
-    let has_target_errors = live.target_statuses.iter().any(|t| !t.connected);
-    let has_record_notice = !live.record_detail.is_empty() && !recording;
+    let source_id = egui::Id::new(("source-feedback", source.id));
+    let input_hint = (!present).then(|| {
+        let consequence = match (streaming, recording) {
+            (true, true) => "Sändningen och inspelningen får tyst ljud. ",
+            (true, false) => "Sändningen får tyst ljud. ",
+            (false, true) => "Inspelningen får tyst ljud. ",
+            (false, false) => "",
+        };
+        format!("{consequence}{}", engine.input_hint(source))
+    });
+    let has_connected = live
+        .targets
+        .iter()
+        .any(|t| t.sending && matches!(t.detail, OutputStatus::Progress(_)));
+    let has_other_targets = live
+        .targets
+        .iter()
+        .any(|t| !t.sending || matches!(t.detail, OutputStatus::Problem(_)) || t.audio_gap);
+    let has_record_notice = !live.record_detail.is_empty() || live.record_audio_gap;
 
-    if !present || has_connected || has_target_errors || has_record_notice {
+    if input_hint.is_some() || has_connected || has_other_targets || has_record_notice {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
 
-            if !present {
-                let message = if source.device.is_empty() {
-                    "Välj en ljudingång i inställningarna."
-                } else if streaming && recording {
-                    "Ljudingången saknas – sändning och inspelning får tyst signal."
-                } else if streaming {
-                    "Ljudingången saknas – sändningen får tyst signal."
-                } else if recording {
-                    "Ljudingången saknas – inspelningen får tyst signal."
-                } else {
-                    "Väntar på ljudingången."
-                };
-                wrapping_dot_pill(
-                    ui,
-                    message,
-                    palette.warning,
-                    palette.warn_pill_bg,
-                    palette.warn_pill_border,
-                    palette.warning,
-                );
-            }
+            dismissible_dot_pill(
+                ui,
+                source_id.with(("input", &source.device)),
+                input_hint.as_deref(),
+                palette.warning,
+                palette.warn_pill_bg,
+                palette.warn_pill_border,
+                palette.warning,
+            );
 
             if has_connected {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    for target in live.target_statuses.iter().filter(|t| t.connected) {
+                    for target in live
+                        .targets
+                        .iter()
+                        .filter(|t| t.sending && matches!(t.detail, OutputStatus::Progress(_)))
+                    {
                         dot_pill(
                             ui,
                             &format!("{} · Ansluten", target.name),
@@ -3532,10 +3579,43 @@ fn source_status_notices(
                 });
             }
 
-            for target in live.target_statuses.iter().filter(|t| !t.connected) {
-                wrapping_dot_pill(
+            for (index, target) in live.targets.iter().enumerate() {
+                let id = source_id.with(("stream", live.stream_attempt, index));
+                let problem = match &target.detail {
+                    OutputStatus::Problem(reason) => Some(format!("{} · {reason}", target.name)),
+                    OutputStatus::Progress(status) => {
+                        if !target.sending {
+                            wrapping_dot_pill(
+                                ui,
+                                &format!("{} · {status}", target.name),
+                                palette.warning,
+                                palette.warn_pill_bg,
+                                palette.warn_pill_border,
+                                palette.warning,
+                            );
+                        }
+                        None
+                    }
+                };
+                dismissible_dot_pill(
                     ui,
-                    &format!("{} · {}", target.name, target.detail),
+                    id,
+                    problem.as_deref(),
+                    palette.warning,
+                    palette.warn_pill_bg,
+                    palette.warn_pill_border,
+                    palette.warning,
+                );
+                let gap = target.audio_gap.then(|| {
+                    format!(
+                        "{} · Delar av ljudet har fallit bort under sändningen.",
+                        target.name
+                    )
+                });
+                dismissible_dot_pill(
+                    ui,
+                    id.with("audio-gap"),
+                    gap.as_deref(),
                     palette.warning,
                     palette.warn_pill_bg,
                     palette.warn_pill_border,
@@ -3543,7 +3623,7 @@ fn source_status_notices(
                 );
             }
 
-            if has_record_notice {
+            if !live.record_detail.is_empty() && !recording {
                 let saved = live.record_detail.starts_with("Sparad · ");
                 let (dot, bg, border, fg) = if saved {
                     (
@@ -3569,7 +3649,21 @@ fn source_status_notices(
                     fg,
                 );
             }
+            dismissible_dot_pill(
+                ui,
+                source_id.with(("record-gap", live.record_attempt)),
+                live.record_audio_gap
+                    .then_some("Inspelning · Delar av ljudet har fallit bort i inspelningen."),
+                palette.warning,
+                palette.warn_pill_bg,
+                palette.warn_pill_border,
+                palette.warning,
+            );
         });
+    } else {
+        // Clear any previously dismissed state once conditions recover.
+        feedback::condition(ui, source_id.with(("input", &source.device)), None);
+        feedback::condition(ui, source_id.with(("record-gap", live.record_attempt)), None);
     }
 }
 
@@ -4420,14 +4514,6 @@ fn empty_sources_view(ui: &mut EguiUi, palette: Palette, on_add: impl FnOnce()) 
     });
 }
 
-fn display_name(source: &Source) -> &str {
-    if source.name.trim().is_empty() {
-        "Namnlös ljudkälla"
-    } else {
-        &source.name
-    }
-}
-
 fn destination_choice_label(dest: &Destination) -> String {
     let name = dest.display_name();
     let mount = dest.mount.trim();
@@ -4547,7 +4633,7 @@ fn source_card(
                     |ui| {
                         ui.add(
                             egui::Label::new(strong_text(
-                                display_name(source),
+                                source.display_name(),
                                 FONT_TITLE_S,
                                 palette.text_primary,
                             ))
@@ -4604,7 +4690,7 @@ fn source_card(
                 });
             });
 
-            source_status_notices(ui, source, present, streaming, recording, &live, palette);
+            source_status_notices(ui, engine, source, present, streaming, recording, &live, palette);
 
             // Narrow stereo/mono meter strip with tiny V/H tag + dB readout
             ui.push_id(source.id, |ui| {
@@ -4742,7 +4828,7 @@ fn source_card(
                     |ui| {
                         ui.add(
                             egui::Label::new(strong_text(
-                                display_name(source),
+                                source.display_name(),
                                 FONT_TITLE_S,
                                 palette.text_primary,
                             ))
@@ -4812,7 +4898,7 @@ fn source_card(
         } else {
             ui.horizontal_wrapped(|ui| {
                 ui.label(strong_text(
-                    display_name(source),
+                    source.display_name(),
                     FONT_TITLE_M,
                     palette.text_primary,
                 ));
@@ -4899,8 +4985,7 @@ fn source_card(
                 .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
         }
 
-        source_status_notices(ui, source, present, streaming, recording, &live, palette);
-
+        source_status_notices(ui, engine, source, present, streaming, recording, &live, palette);
         ui.push_id(source.id, |ui| {
             if compact {
                 compact_meter(ui, &levels[..if stereo { 2 } else { 1 }], palette);
@@ -6047,6 +6132,7 @@ fn source_settings(
                 if compact_button(ui, "Öppna mapp", !empty, None, palette).clicked() {
                     let error = open_recording_folder(folder).err();
                     ui.data_mut(|data| {
+                        data.remove::<egui::Id>(error_id.with("dismissed"));
                         if let Some(error) = error {
                             data.insert_temp(error_id, error);
                         } else {
@@ -6072,26 +6158,15 @@ fn source_settings(
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let folder_label = ui.label("Mapp").id;
                 render_folder_controls(ui, &mut source.recording.folder, folder_label, &mut outcome);
-                if source.recording.folder.trim().is_empty() {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new("Välj en mapp för att kunna spela in.")
-                                .size(FONT_CAPTION)
-                                .color(palette.danger),
-                        )
-                        .wrap(),
-                    );
-                } else if let Some(error) = ui.data(|data| data.get_temp::<String>(error_id)) {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&error)
-                                .size(FONT_CAPTION)
-                                .color(palette.danger),
-                        )
-                        .wrap(),
-                    );
+                let folder_error = ui.data(|data| data.get_temp::<String>(error_id));
+                let hint = if source.recording.folder.trim().is_empty() {
+                    Some("Välj en mapp för att kunna spela in.")
+                } else {
+                    folder_error.as_deref()
+                };
+                if ui.is_enabled() {
+                    feedback::condition(ui, error_id.with("dismissed"), hint);
                 }
-
                 ui.label("Filnamnsformat");
                 ComboBox::from_id_salt("filename-format")
                     .width((ui.available_width() - 8.0).max(120.0))
@@ -6183,24 +6258,14 @@ fn source_settings(
                         folder_label,
                         &mut outcome,
                     );
-                    if source.recording.folder.trim().is_empty() {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new("Välj en mapp för att kunna spela in.")
-                                    .size(FONT_CAPTION)
-                                    .color(palette.danger),
-                            )
-                            .wrap(),
-                        );
-                    } else if let Some(error) = ui.data(|data| data.get_temp::<String>(error_id)) {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&error)
-                                    .size(FONT_CAPTION)
-                                    .color(palette.danger),
-                            )
-                            .wrap(),
-                        );
+                    let folder_error = ui.data(|data| data.get_temp::<String>(error_id));
+                    let hint = if source.recording.folder.trim().is_empty() {
+                        Some("Välj en mapp för att kunna spela in.")
+                    } else {
+                        folder_error.as_deref()
+                    };
+                    if ui.is_enabled() {
+                        feedback::condition(ui, error_id.with("dismissed"), hint);
                     }
                 });
 
@@ -6341,7 +6406,13 @@ fn destination_settings(
             mount_hint,
             palette,
         );
-        changed |= stacked_field(ui, "Användarnamn", &mut destination.user, palette).changed();
+        changed |= stacked_validated_field(
+            ui,
+            "Användarnamn",
+            &mut destination.user,
+            crate::output::username_hint,
+            palette,
+        );
 
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
@@ -6444,7 +6515,13 @@ fn destination_settings(
             );
         });
         col_box(ui, col_w, spacing_x, |ui| {
-            changed |= stacked_field(ui, "Användarnamn", &mut destination.user, palette).changed();
+            changed |= stacked_validated_field(
+                ui,
+                "Användarnamn",
+                &mut destination.user,
+                crate::output::username_hint,
+                palette,
+            );
         });
     });
     let mut codec_changed = false;
@@ -6528,7 +6605,7 @@ fn bitrate_range(format: &str) -> Option<std::ops::RangeInclusive<u32>> {
 
 fn open_recording_folder(folder: &str) -> Result<(), String> {
     let path = std::path::absolute(folder)
-        .map_err(|error| format!("Kunde inte läsa mappsökvägen. {error}"))?;
+        .map_err(|_| "Mappsökvägen kunde inte läsas. Välj inspelningsmappen igen.")?;
     if !path.is_dir() {
         return Err("Mappen finns inte. Kontrollera sökvägen eller välj en befintlig mapp.".into());
     }
@@ -6543,7 +6620,7 @@ fn open_recording_folder(folder: &str) -> Result<(), String> {
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("Kunde inte öppna mappen. {error}"))
+        .map_err(|_| "Filhanteraren kunde inte öppnas. Öppna inspelningsmappen manuellt.".into())
 }
 
 fn server_hint(value: &str) -> Option<&'static str> {
@@ -6628,11 +6705,12 @@ fn stacked_validated_field(
     palette: Palette,
 ) -> bool {
     let input = stacked_field(ui, label, value, palette);
-    if let Some(hint) = validate(value) {
+    let hint = validate(value);
+    if hint.is_some() {
         mark_invalid(ui, &input, palette);
-        ui.add(
-            egui::Label::new(RichText::new(hint).size(FONT_CAPTION).color(palette.danger)).wrap(),
-        );
+    }
+    if ui.is_enabled() {
+        feedback::condition(ui, ui.make_persistent_id(("field-error", label)), hint);
     }
     input.changed()
 }
@@ -7436,13 +7514,14 @@ mod tests {
             activity_log: VecDeque::new(),
             last_logged_issues: HashMap::new(),
             save_state: SaveState::Idle,
-            notice: None,
+            recording_errors: VecDeque::new(),
+            hidden_settings_error: None,
             new_destination_draft: None,
             confirm_stop: None,
             app_icon: None,
             close_blocked: false,
             close_confirmed: false,
-            load_blocked: false,
+            load_error: None,
         };
 
         ui.delete_destination(1);
@@ -7522,13 +7601,14 @@ mod tests {
             }]),
             last_logged_issues: HashMap::new(),
             save_state: SaveState::Idle,
-            notice: Some("Reserv återansluter…".into()),
+            recording_errors: VecDeque::from(["Reserv återansluter…".into()]),
+            hidden_settings_error: None,
             new_destination_draft: None,
             confirm_stop: None,
             app_icon: None,
             close_blocked: false,
             close_confirmed: false,
-            load_blocked: false,
+            load_error: None,
         };
 
         for view in [View::Overview, View::SourceSettings, View::Destinations] {
