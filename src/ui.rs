@@ -4834,7 +4834,8 @@ fn source_card(
         if compact && narrow {
             ui.horizontal(|ui| {
                 let controls_w = if show_settings_button { 104.0 } else { 70.0 };
-                let title_max_w = (ui.available_width() - controls_w).max(60.0);
+                let ready_w = if ready { 54.0 } else { 0.0 };
+                let title_max_w = (ui.available_width() - controls_w - ready_w).max(60.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(title_max_w, 28.0),
                     Layout::left_to_right(Align::Center),
@@ -4875,12 +4876,12 @@ fn source_card(
                         palette,
                         &mut actions,
                     );
+                    show_ready(ui);
                 });
             });
-            if streaming || recording || ready {
+            if streaming || recording {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    show_ready(ui);
                     if streaming {
                         let stream_text = if live.connected > 0 {
                             format!("Sänder · {}", format_hms(live.stream_elapsed))
@@ -4917,7 +4918,6 @@ fn source_card(
                     palette.text_primary,
                 ));
                 crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
-                show_ready(ui);
                 if streaming {
                     let stream_text = if live.connected > 0 {
                         format!("Sänder · {}", format_hms(live.stream_elapsed))
@@ -4972,10 +4972,11 @@ fn source_card(
                             palette,
                             &mut actions,
                         );
+                        show_ready(ui);
                     });
-                } else if show_settings_button {
+                } else if show_settings_button || ready {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if action_button(
+                        if show_settings_button && action_button(
                             ui,
                             Icon::Settings,
                             "Inställningar",
@@ -4988,6 +4989,7 @@ fn source_card(
                         {
                             actions.open_settings = true;
                         }
+                        show_ready(ui);
                     });
                 }
             });
