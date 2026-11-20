@@ -232,6 +232,51 @@ fn slow_icecast_handshake_preserves_startup_audio() {
 }
 
 #[test]
+fn full_output_queue_reports_audio_loss_and_preserves_accepted_blocks_on_stop() {
+    let (resume, paused) = mpsc::channel();
+    let (drained, result) = mpsc::channel();
+    let mut output = Output::start(2, move |receiver, _| {
+        if paused.recv().is_ok() {
+            drained.send(receiver.into_iter().collect::<Vec<_>>()).unwrap();
+        }
+    });
+
+    output.push(&[]);
+    output.push(&[0.1, 0.2]);
+    output.push(&[0.3, 0.4]);
+    assert!(!output.dropped_audio());
+    output.push(&[0.5, 0.6]);
+    assert!(output.dropped_audio());
+    output.stop();
+    output.push(&[0.7, 0.8]);
+    resume.send(()).unwrap();
+    assert_eq!(
+        result.recv_timeout(Duration::from_secs(2)).unwrap(),
+        [vec![0.1, 0.2], vec![0.3, 0.4]]
+    );
+}
+
+#[test]
+fn https_stream_uses_tls_default_port_and_separate_password_argument() {
+    let destination = Destination {
+        server: "https://[::1]/unused".into(),
+        mount: "/Möte live.opus".into(),
+        user: "  ".into(),
+        password: "test @:/?%".into(),
+        ..Default::default()
+    };
+    let (target, tls) = StreamTarget::parse(&destination).unwrap();
+    let command = stream_command(&destination, 1, &target, tls).unwrap();
+    let args: Vec<_> = command.get_args().map(|arg| arg.to_str().unwrap()).collect();
+    assert!(args.windows(2).any(|pair| pair == ["-tls", "1"]));
+    assert!(args.windows(2).any(|pair| pair == ["-password", "test @:/?%"]));
+    assert_eq!(
+        args.last(),
+        Some(&"icecast://source@[::1]:443/M%C3%B6te%20live.opus")
+    );
+}
+
+#[test]
 fn formats_recording_filename_with_placeholders_and_sanitization() {
     let dt = LocalDateTime {
         year: 2026,

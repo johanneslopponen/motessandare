@@ -8,6 +8,8 @@ mod listener_stats;
 mod output;
 mod recording_dialog;
 mod settings;
+#[cfg(test)]
+mod test_ui;
 mod ui;
 
 use engine::Engine;
