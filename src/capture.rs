@@ -61,6 +61,10 @@ impl Capture {
         }
     }
 
+    pub fn force_scan(&mut self) {
+        self.last_scan = None;
+    }
+
     pub fn devices(&self) -> Vec<(String, String, usize)> {
         self.devices
             .iter()

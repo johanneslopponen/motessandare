@@ -102,6 +102,7 @@ pub struct Engine {
     mixer: Arc<Mutex<Mixer>>,
     inputs: Arc<Mutex<Inputs>>,
     stop: Arc<AtomicBool>,
+    rescan: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -110,13 +111,18 @@ impl Engine {
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let inputs = Arc::new(Mutex::new(Inputs::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        let rescan = Arc::new(AtomicBool::new(false));
         let manager = {
             let mixer = Arc::clone(&mixer);
             let inputs = Arc::clone(&inputs);
             let stop = Arc::clone(&stop);
+            let rescan = Arc::clone(&rescan);
             thread::spawn(move || {
                 let mut capture = Capture::new();
                 while !stop.load(Ordering::Acquire) {
+                    if rescan.swap(false, Ordering::AcqRel) {
+                        capture.force_scan();
+                    }
                     let wanted: HashSet<_> = mixer
                         .lock()
                         .unwrap()
@@ -159,8 +165,13 @@ impl Engine {
             mixer,
             inputs,
             stop,
+            rescan,
             workers: vec![clock, manager],
         }
+    }
+
+    pub fn refresh_devices(&self) {
+        self.rescan.store(true, Ordering::Release);
     }
 
     pub fn devices(&self) -> Devices {
@@ -235,14 +246,21 @@ impl Engine {
         if let Some(session) = mixer.sessions.get(&id) {
             status.total = session.streams.len();
             for (index, stream) in session.streams.iter().enumerate() {
-                let (sending, detail) = match &stream.output {
-                    Ok(output) => (
-                        !output.finished() && !output.encoded_time().is_zero(),
-                        output.status(),
-                    ),
-                    Err(error) => (false, error.clone()),
+                let (sending, detail, encoded) = match &stream.output {
+                    Ok(output) => {
+                        let encoded = output.encoded_time();
+                        (
+                            !output.finished() && !encoded.is_zero(),
+                            output.status(),
+                            encoded,
+                        )
+                    }
+                    Err(error) => (false, error.clone(), Duration::ZERO),
                 };
                 status.connected += usize::from(sending);
+                if sending {
+                    status.stream_elapsed = status.stream_elapsed.max(encoded);
+                }
                 let name = if stream.name.is_empty() {
                     format!("Sändare {}", index + 1)
                 } else {
@@ -251,6 +269,11 @@ impl Engine {
                 if !sending || detail != "Sänder" {
                     status.issues.push(format!("{name} · {detail}"));
                 }
+                status.target_statuses.push(TargetStatus {
+                    name: name.clone(),
+                    connected: sending && detail == "Sänder",
+                    detail,
+                });
                 status.targets.push(name);
             }
             if let Some(recorder) = &session.recorder {
@@ -298,12 +321,21 @@ impl Engine {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetStatus {
+    pub name: String,
+    pub connected: bool,
+    pub detail: String,
+}
+
 #[derive(Default)]
 pub struct LiveStatus {
     pub connected: usize,
     pub total: usize,
     pub issues: Vec<String>,
     pub targets: Vec<String>,
+    pub target_statuses: Vec<TargetStatus>,
+    pub stream_elapsed: Duration,
     pub elapsed: Duration,
     pub record_detail: String,
 }
@@ -324,11 +356,21 @@ struct Block {
     samples: Vec<f32>,
 }
 
-fn read_inputs(readers: &HashMap<String, Reader>, converters: &mut HashMap<String, Converter>) -> HashMap<String, Block> {
+fn read_inputs(
+    readers: &HashMap<String, Reader>,
+    converters: &mut HashMap<String, Converter>,
+) -> HashMap<String, Block> {
     converters.retain(|id, _| readers.contains_key(id));
-    readers.iter().filter_map(|(id, reader)| {
-        converters.entry(id.clone()).or_default().pull(reader).map(|block| (id.clone(), block))
-    }).collect()
+    readers
+        .iter()
+        .filter_map(|(id, reader)| {
+            converters
+                .entry(id.clone())
+                .or_default()
+                .pull(reader)
+                .map(|block| (id.clone(), block))
+        })
+        .collect()
 }
 
 fn channel_count(source: &Source) -> u16 {
@@ -388,7 +430,11 @@ impl Mixer {
                 None => "Destinationen används redan av en annan ljudkälla.".into(),
             });
         }
-        if self.stopping_streams.iter().any(|stream| stream.uses(target)) {
+        if self
+            .stopping_streams
+            .iter()
+            .any(|stream| stream.uses(target))
+        {
             return Some(
                 "Sändningen till destinationen håller på att stoppas. Försök igen om en stund."
                     .into(),
@@ -661,6 +707,7 @@ mod tests {
             mixer: Arc::new(Mutex::new(Mixer::default())),
             inputs: Arc::new(Mutex::new(Inputs::default())),
             stop: Arc::new(AtomicBool::new(false)),
+            rescan: Arc::new(AtomicBool::new(false)),
             workers: Vec::new(),
         };
         engine.update(&[first.clone(), second.clone()]);

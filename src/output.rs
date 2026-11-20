@@ -135,7 +135,12 @@ impl Output {
     }
 
     pub fn recording_result(&self) -> Result<PathBuf, String> {
-        self.state.saved_file.lock().unwrap().clone().ok_or_else(|| self.status())
+        self.state
+            .saved_file
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| self.status())
     }
 
     pub fn finished(&self) -> bool {
@@ -581,6 +586,11 @@ fn format_recording_stem(template: &str, name: &str, now: LocalDateTime) -> Stri
     } else {
         trimmed.to_owned()
     }
+}
+
+pub fn local_hm() -> String {
+    let now = local_now();
+    format!("{:02}:{:02}", now.hour, now.minute)
 }
 
 pub fn preview_recording_filename(template: &str, name: &str, format: &str) -> String {

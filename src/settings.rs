@@ -110,7 +110,10 @@ impl Default for Source {
 }
 
 impl Source {
-    pub fn resolve_destinations<'a>(&self, destinations: &'a [Destination]) -> Vec<&'a Destination> {
+    pub fn resolve_destinations<'a>(
+        &self,
+        destinations: &'a [Destination],
+    ) -> Vec<&'a Destination> {
         self.destination_ids
             .iter()
             .filter_map(|id| destinations.iter().find(|dest| dest.id == *id))
@@ -118,10 +121,20 @@ impl Source {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub compact_overview: Option<bool>,
+    pub theme: ThemePreference,
     pub destinations: Vec<Destination>,
     pub sources: Vec<Source>,
 }
@@ -194,6 +207,8 @@ impl Default for RawSource {
 struct RawSettingsObject {
     compact_overview: Option<bool>,
     #[serde(default)]
+    theme: ThemePreference,
+    #[serde(default)]
     destinations: Vec<Destination>,
     #[serde(default)]
     sources: Vec<RawSource>,
@@ -210,6 +225,7 @@ fn migrate_raw(
     destinations: Vec<Destination>,
     raw_sources: Vec<RawSource>,
     compact_overview: Option<bool>,
+    theme: ThemePreference,
 ) -> Settings {
     let original_ids: HashSet<u64> = destinations
         .iter()
@@ -218,10 +234,13 @@ fn migrate_raw(
         .collect();
     let mut settings = Settings {
         compact_overview,
+        theme,
         destinations,
         sources: Vec::with_capacity(raw_sources.len()),
     };
-    repair_ids(&mut settings.destinations, |destination| &mut destination.id);
+    repair_ids(&mut settings.destinations, |destination| {
+        &mut destination.id
+    });
 
     for raw in raw_sources {
         let mut seen = HashSet::new();
@@ -297,8 +316,18 @@ pub fn settings_save(settings: &Settings) -> Result<(), String> {
 fn load_plain(path: &std::path::Path) -> Result<Settings, String> {
     match read_settings::<StoredSettings>(path)? {
         None => Ok(Settings::default()),
-        Some(StoredSettings::Object(raw)) => Ok(migrate_raw(raw.destinations, raw.sources, raw.compact_overview)),
-        Some(StoredSettings::LegacyArray(sources)) => Ok(migrate_raw(Vec::new(), sources, None)),
+        Some(StoredSettings::Object(raw)) => Ok(migrate_raw(
+            raw.destinations,
+            raw.sources,
+            raw.compact_overview,
+            raw.theme,
+        )),
+        Some(StoredSettings::LegacyArray(sources)) => Ok(migrate_raw(
+            Vec::new(),
+            sources,
+            None,
+            ThemePreference::default(),
+        )),
     }
 }
 
@@ -337,8 +366,8 @@ fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), 
 #[cfg(target_os = "macos")]
 mod keychain {
     use super::{
-        Deserialize, Destination, RawSource, Serialize, Settings, Source, fs, migrate_raw,
-        read_settings, write_settings,
+        Deserialize, Destination, RawSource, Serialize, Settings, Source, ThemePreference, fs,
+        migrate_raw, read_settings, write_settings,
     };
     use security_framework::passwords::{
         delete_generic_password, generic_password, set_generic_password,
@@ -364,6 +393,8 @@ mod keychain {
     #[derive(Deserialize)]
     struct RawProtectedSettings {
         compact_overview: Option<bool>,
+        #[serde(default)]
+        theme: ThemePreference,
         credential_account: Option<String>,
         #[serde(default)]
         destinations: Vec<Destination>,
@@ -374,6 +405,7 @@ mod keychain {
     #[derive(Serialize)]
     struct ProtectedSettings {
         compact_overview: Option<bool>,
+        theme: ThemePreference,
         credential_account: Option<String>,
         destinations: Vec<Destination>,
         sources: Vec<Source>,
@@ -399,7 +431,8 @@ mod keychain {
         match read_settings(path)? {
             None => Ok(Settings::default()),
             Some(StoredSettings::Legacy(raw_sources)) => {
-                let settings = migrate_raw(Vec::new(), raw_sources, None);
+                let settings =
+                    migrate_raw(Vec::new(), raw_sources, None, ThemePreference::default());
                 if settings
                     .destinations
                     .iter()
@@ -464,7 +497,12 @@ mod keychain {
                 }
             }
         }
-        Ok(migrate_raw(raw.destinations, raw.sources, raw.compact_overview))
+        Ok(migrate_raw(
+            raw.destinations,
+            raw.sources,
+            raw.compact_overview,
+            raw.theme,
+        ))
     }
 
     fn commit(
@@ -499,6 +537,7 @@ mod keychain {
         };
         let protected = ProtectedSettings {
             compact_overview: settings.compact_overview,
+            theme: settings.theme,
             credential_account: new_account,
             destinations: safe_destinations,
             sources: settings.sources.clone(),
@@ -532,6 +571,7 @@ mod tests {
         let file = dir.path().join("sources.json");
         let settings = Settings {
             compact_overview: Some(false),
+            theme: ThemePreference::Dark,
             destinations: vec![
                 Destination {
                     id: 1,

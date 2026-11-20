@@ -1,7 +1,7 @@
 use crate::{Destination, output::StreamTarget};
 use eframe::egui::Context;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use url::Url;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+const MAX_HISTORY_SAMPLES: usize = 24;
 
 pub struct StatsTarget {
     pub server: String,
@@ -37,6 +38,7 @@ type ServerResult = Result<HashMap<String, ListenerCounts>, String>;
 #[derive(Default)]
 pub struct ListenerStats {
     servers: HashMap<String, ServerStats>,
+    history: HashMap<(String, String), VecDeque<u64>>,
 }
 
 #[derive(Default)]
@@ -57,15 +59,32 @@ impl ListenerStats {
     pub fn update(&mut self, ctx: &Context, servers: HashSet<&str>, refresh: bool) {
         self.servers
             .retain(|server, _| servers.contains(server.as_str()));
+        self.history
+            .retain(|(server, _), _| servers.contains(server.as_str()));
         let now = Instant::now();
         for server in servers {
             let stats = self.servers.entry(server.to_owned()).or_default();
             if let Some(pending) = &stats.pending {
-                stats.result = Some(match pending.try_recv() {
+                let received = match pending.try_recv() {
                     Ok(result) => result,
                     Err(TryRecvError::Empty) => continue,
                     Err(TryRecvError::Disconnected) => Err("Hämtningen avbröts".to_owned()),
-                });
+                };
+                if let Ok(mounts) = &received {
+                    for (mount, counts) in mounts {
+                        if let Some(current) = counts.current {
+                            let samples = self
+                                .history
+                                .entry((server.to_owned(), mount.clone()))
+                                .or_default();
+                            if samples.len() >= MAX_HISTORY_SAMPLES {
+                                samples.pop_front();
+                            }
+                            samples.push_back(current);
+                        }
+                    }
+                }
+                stats.result = Some(received);
                 stats.pending = None;
             }
 
@@ -93,6 +112,12 @@ impl ListenerStats {
         self.servers.values().any(|stats| stats.pending.is_some())
     }
 
+    pub fn history(&self, target: &StatsTarget) -> Option<&VecDeque<u64>> {
+        self.history
+            .get(&(target.server.clone(), target.mount.clone()))
+            .filter(|samples| samples.len() >= 2)
+    }
+
     pub fn status(&self, target: &StatsTarget) -> MountStatus<'_> {
         match self
             .servers
@@ -106,6 +131,130 @@ impl ListenerStats {
             None => MountStatus::Loading,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionProbeStatus {
+    Testing,
+    Ok(String),
+    Failed(String),
+}
+
+#[derive(Default)]
+pub struct ConnectionTester {
+    pending: HashMap<u64, Receiver<Result<String, String>>>,
+    results: HashMap<u64, Result<String, String>>,
+}
+
+impl ConnectionTester {
+    pub fn poll(&mut self) {
+        let finished: Vec<(u64, Result<String, String>)> = self
+            .pending
+            .iter()
+            .filter_map(|(&id, rx)| match rx.try_recv() {
+                Ok(res) => Some((id, res)),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some((id, Err("Testet avbröts".to_owned()))),
+            })
+            .collect();
+        for (id, res) in finished {
+            self.pending.remove(&id);
+            self.results.insert(id, res);
+        }
+    }
+
+    pub fn clear(&mut self, dest_id: u64) {
+        self.pending.remove(&dest_id);
+        self.results.remove(&dest_id);
+    }
+
+    pub fn start(&mut self, ctx: &Context, dest: &Destination) {
+        let dest_id = dest.id;
+        let target = match StatsTarget::parse(dest) {
+            Ok(target) => target,
+            Err(error) => {
+                self.pending.remove(&dest_id);
+                self.results.insert(dest_id, Err(error.to_owned()));
+                return;
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        self.results.remove(&dest_id);
+        match std::thread::Builder::new()
+            .name("icecast-probe".into())
+            .spawn(move || {
+                let res = probe_server(&target.server);
+                if tx.send(res).is_ok() {
+                    ctx.request_repaint();
+                }
+            }) {
+            Ok(_) => {
+                self.pending.insert(dest_id, rx);
+            }
+            Err(_) => {
+                self.results.insert(
+                    dest_id,
+                    Err("Kunde inte starta anslutningstestet".to_owned()),
+                );
+            }
+        }
+    }
+
+    pub fn status(&self, dest_id: u64) -> Option<ConnectionProbeStatus> {
+        if self.pending.contains_key(&dest_id) {
+            return Some(ConnectionProbeStatus::Testing);
+        }
+        self.results.get(&dest_id).map(|res| match res {
+            Ok(msg) => ConnectionProbeStatus::Ok(msg.clone()),
+            Err(err) => ConnectionProbeStatus::Failed(err.clone()),
+        })
+    }
+}
+
+fn probe_server(server: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| "Kunde inte starta HTTP-klienten".to_owned())?;
+    let started = Instant::now();
+    let status_url = format!("{server}/status-json.xsl");
+    let response = client.get(&status_url).send().map_err(|error| {
+        if error.is_timeout() {
+            "Servern svarade inte i tid".to_owned()
+        } else {
+            "Kunde inte ansluta till servern".to_owned()
+        }
+    })?;
+    let latency_ms = started.elapsed().as_millis();
+    let code = response.status();
+    if code.is_success() {
+        let mut body = Vec::new();
+        let _ = response.take(MAX_RESPONSE_BYTES).read_to_end(&mut body);
+        if let Ok(parsed) = serde_json::from_slice::<ProbeResponse>(&body)
+            && let Some(server_id) = parsed.icestats.server_id.filter(|s| !s.trim().is_empty())
+        {
+            return Ok(format!("{server_id} nåddes ({latency_ms} ms)"));
+        }
+        return Ok(format!("Servern nåddes ({latency_ms} ms)"));
+    }
+    if code.as_u16() == 404 || code.as_u16() == 403 {
+        return Ok(format!(
+            "Servern svarade (HTTP {}, {latency_ms} ms)",
+            code.as_u16()
+        ));
+    }
+    Err(format!("Servern returnerade HTTP {}", code.as_u16()))
+}
+
+#[derive(Deserialize)]
+struct ProbeResponse {
+    icestats: ProbeIceStats,
+}
+
+#[derive(Deserialize)]
+struct ProbeIceStats {
+    server_id: Option<String>,
 }
 
 fn fetch(url: &str) -> ServerResult {
