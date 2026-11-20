@@ -1468,7 +1468,7 @@ impl Ui {
                     .shadow(palette.card_shadow),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(300.0);
+                ui.set_width((ctx.screen_rect().width() - 60.0).clamp(1.0, 360.0));
                 ui.label(strong_text(title, 16.0, palette.text_primary));
                 ui.add_space(6.0);
                 ui.label(RichText::new(&body).color(palette.text_secondary));
@@ -3542,17 +3542,13 @@ fn source_status_notices(
         };
         format!("{consequence}{}", engine.input_hint(source))
     });
-    let has_connected = live
-        .targets
-        .iter()
-        .any(|t| t.sending && matches!(t.detail, OutputStatus::Progress(_)));
     let has_other_targets = live
         .targets
         .iter()
         .any(|t| !t.sending || matches!(t.detail, OutputStatus::Problem(_)) || t.audio_gap);
     let has_record_notice = !live.record_detail.is_empty() || live.record_audio_gap;
 
-    if input_hint.is_some() || has_connected || has_other_targets || has_record_notice {
+    if input_hint.is_some() || has_other_targets || has_record_notice {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
 
@@ -3565,26 +3561,6 @@ fn source_status_notices(
                 palette.warn_pill_border,
                 palette.warning,
             );
-
-            if has_connected {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for target in live
-                        .targets
-                        .iter()
-                        .filter(|t| t.sending && matches!(t.detail, OutputStatus::Progress(_)))
-                    {
-                        dot_pill(
-                            ui,
-                            &format!("{} · Ansluten", target.name),
-                            palette.stream_accent,
-                            palette.stream_pill_bg,
-                            palette.stream_active_border,
-                            palette.stream_accent,
-                        );
-                    }
-                });
-            }
 
             for (index, target) in live.targets.iter().enumerate() {
                 let id = source_id.with(("stream", live.stream_attempt, index));
@@ -3669,6 +3645,11 @@ fn source_status_notices(
         });
     } else {
         // Clear any previously dismissed state once conditions recover.
+        for index in 0..live.targets.len() {
+            let id = source_id.with(("stream", live.stream_attempt, index));
+            feedback::condition(ui, id, None);
+            feedback::condition(ui, id.with("audio-gap"), None);
+        }
         feedback::condition(ui, source_id.with(("input", &source.device)), None);
         feedback::condition(ui, source_id.with(("record-gap", live.record_attempt)), None);
     }
@@ -4476,7 +4457,7 @@ fn status_pill(
     bg: Color32,
     border: Color32,
     fg: Color32,
-) {
+) -> egui::Response {
     Frame::new()
         .fill(bg)
         .stroke(Stroke::new(1.0, border))
@@ -4484,7 +4465,8 @@ fn status_pill(
         .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
             ui.label(text.into().size(12.0).color(fg));
-        });
+        })
+        .response
 }
 
 fn empty_sources_view(ui: &mut EguiUi, palette: Palette, on_add: impl FnOnce()) {
@@ -4602,6 +4584,65 @@ fn source_card(
 ) -> SourceCardActions {
     let mut actions = SourceCardActions::default();
     let live = engine.live_status(source.id);
+    let resolved = source.resolve_destinations(destinations);
+    let count = resolved.len();
+    let show_destinations = |ui: &mut EguiUi| {
+        let total = if streaming { live.targets.len() } else { count };
+        let noun = if total == 1 { "destination" } else { "destinationer" };
+        let label = if streaming {
+            format!("{}/{total} {noun}", live.connected)
+        } else {
+            format!("{total} {noun}")
+        };
+        let pill = status_pill(
+            ui, label, palette.pill_bg, palette.pill_border, palette.text_secondary,
+        );
+        if total > 0 {
+            pill.on_hover_ui(|ui| {
+                if streaming {
+                    for target in &live.targets {
+                        let state = if target.sending { "Ansluten" } else { "Ej ansluten" };
+                        ui.label(format!("{} · {state}", target.name));
+                    }
+                } else {
+                    for dest in &resolved {
+                        ui.label(dest.display_name());
+                    }
+                }
+            });
+        }
+    };
+    let show_activity = |ui: &mut EguiUi| {
+        if streaming {
+            let stream_text = if live.connected > 0 {
+                format!("Sänder · {}", format_hms(live.stream_elapsed))
+            } else {
+                "Sändning begärd".to_owned()
+            };
+            dot_pill(
+                ui,
+                &stream_text,
+                palette.stream_accent,
+                palette.stream_pill_bg,
+                palette.stream_active_border,
+                palette.stream_accent,
+            );
+        }
+        if recording {
+            let rec_text = format!("Spelar in · {}", format_hms(live.elapsed));
+            dot_pill(
+                ui,
+                &rec_text,
+                palette.record_accent,
+                palette.record_pill_bg,
+                palette.record_active_border,
+                palette.record_accent,
+            );
+        }
+        if streaming && (narrow || compact) {
+            show_destinations(ui);
+        }
+    };
     let border_color = if recording {
         palette.record_active_border
     } else if streaming {
@@ -4676,32 +4717,12 @@ fn source_card(
                     {
                         actions.open_settings = true;
                     }
-                    if recording {
-                        status_pill(
-                            ui,
-                            RichText::new(format_hms(live.elapsed)).monospace(),
-                            palette.record_pill_bg,
-                            palette.record_active_border,
-                            palette.record_accent,
-                        );
-                    } else if streaming {
-                        status_pill(
-                            ui,
-                            RichText::new(if live.connected > 0 {
-                                format_hms(live.stream_elapsed)
-                            } else {
-                                "Ansluter…".to_owned()
-                            })
-                            .monospace(),
-                            palette.stream_pill_bg,
-                            palette.stream_active_border,
-                            palette.stream_accent,
-                        );
-                    } else {
-                        show_ready(ui);
-                    }
+                    show_ready(ui);
                 });
             });
+            if streaming || recording {
+                ui.horizontal_wrapped(|ui| show_activity(ui));
+            }
 
             source_status_notices(ui, engine, source, present, streaming, recording, &live, palette);
 
@@ -4759,7 +4780,6 @@ fn source_card(
             });
 
             // Side-by-side equal-width split controls
-            let count = source.resolve_destinations(destinations).len();
             let stream_enabled = streaming || (!source.device.is_empty() && count > 0);
             let record_enabled = recording
                 || (!source.device.is_empty() && !source.recording.folder.trim().is_empty());
@@ -4869,7 +4889,7 @@ fn source_card(
                     source_output_controls(
                         ui,
                         source,
-                        destinations,
+                        count,
                         streaming,
                         recording,
                         true,
@@ -4882,32 +4902,7 @@ fn source_card(
             if streaming || recording {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    if streaming {
-                        let stream_text = if live.connected > 0 {
-                            format!("Sänder · {}", format_hms(live.stream_elapsed))
-                        } else {
-                            "Sändning begärd".to_owned()
-                        };
-                        dot_pill(
-                            ui,
-                            &stream_text,
-                            palette.stream_accent,
-                            palette.stream_pill_bg,
-                            palette.stream_active_border,
-                            palette.stream_accent,
-                        );
-                    }
-                    if recording {
-                        let rec_text = format!("Spelar in · {}", format_hms(live.elapsed));
-                        dot_pill(
-                            ui,
-                            &rec_text,
-                            palette.record_accent,
-                            palette.record_pill_bg,
-                            palette.record_active_border,
-                            palette.record_accent,
-                        );
-                    }
+                    show_activity(ui);
                 });
             }
         } else {
@@ -4919,32 +4914,7 @@ fn source_card(
                 ));
                 crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
                 show_ready(ui);
-                if streaming {
-                    let stream_text = if live.connected > 0 {
-                        format!("Sänder · {}", format_hms(live.stream_elapsed))
-                    } else {
-                        "Sändning begärd".to_owned()
-                    };
-                    dot_pill(
-                        ui,
-                        &stream_text,
-                        palette.stream_accent,
-                        palette.stream_pill_bg,
-                        palette.stream_active_border,
-                        palette.stream_accent,
-                    );
-                }
-                if recording {
-                    let rec_text = format!("Spelar in · {}", format_hms(live.elapsed));
-                    dot_pill(
-                        ui,
-                        &rec_text,
-                        palette.record_accent,
-                        palette.record_pill_bg,
-                        palette.record_active_border,
-                        palette.record_accent,
-                    );
-                }
+                show_activity(ui);
 
                 if compact {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4966,7 +4936,7 @@ fn source_card(
                         source_output_controls(
                             ui,
                             source,
-                            destinations,
+                            count,
                             streaming,
                             recording,
                             true,
@@ -5037,13 +5007,14 @@ fn source_card(
                 source_output_controls(
                     ui,
                     source,
-                    destinations,
+                    count,
                     streaming,
                     recording,
                     false,
                     palette,
                     &mut actions,
                 );
+                ui.with_layout(Layout::right_to_left(Align::Center), show_destinations);
             });
         }
     });
@@ -5054,15 +5025,13 @@ fn source_card(
 fn source_output_controls(
     ui: &mut EguiUi,
     source: &Source,
-    destinations: &[Destination],
+    count: usize,
     streaming: bool,
     recording: bool,
     compact: bool,
     palette: Palette,
     actions: &mut SourceCardActions,
 ) {
-    let resolved = source.resolve_destinations(destinations);
-    let count = resolved.len();
     let stream_enabled = streaming || (!source.device.is_empty() && count > 0);
     let stream_reason = source_stream_disabled_reason(source, count, streaming);
     let (stream_icon, stream_label, stream_variant) = if streaming {
@@ -5146,35 +5115,6 @@ fn source_output_controls(
     .clicked()
     {
         actions.set_record = Some(!recording);
-    }
-
-    if !compact {
-        let dest_names = resolved
-            .iter()
-            .map(|d| d.display_name())
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let pill = Frame::new()
-                .fill(palette.pill_bg)
-                .stroke(Stroke::new(1.0, palette.pill_border))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::symmetric(8, 2))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(if count == 1 {
-                            "1 destination".to_owned()
-                        } else {
-                            format!("{count} destinationer")
-                        })
-                        .size(FONT_CAPTION)
-                        .color(palette.text_secondary),
-                    );
-                });
-            if !dest_names.is_empty() {
-                pill.response.on_hover_text(dest_names);
-            }
-        });
     }
 }
 
@@ -6755,6 +6695,24 @@ fn col_box(
 mod tests {
     use super::*;
     use crate::test_ui::click_button;
+
+    #[test]
+    fn stop_confirmation_fits_after_resizing_to_minimum_width() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let mut app = Ui::from_settings(Ok(Settings::default()), Engine::new(), None);
+        app.confirm_stop = Some(StopConfirm::Close { discard_changes: false });
+        let id = egui::Id::new(("confirm-stop-modal", true));
+        for width in [1200.0, 420.0] {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 600.0));
+            for _ in 0..2 {
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let _ = ctx.run(input, |ctx| app.stop_confirm_modal(ctx, Palette::for_theme(true)));
+            }
+            let dialog = ctx.memory(|m| m.area_rect(id)).unwrap();
+            assert!(screen.contains_rect(dialog), "{dialog:?} outside {screen:?}");
+        }
+    }
 
     #[test]
     fn active_window_close_requires_explicit_confirmation() {
