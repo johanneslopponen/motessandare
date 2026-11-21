@@ -653,20 +653,21 @@ impl Ui {
         targets
     }
 
-    fn wide_live_panel(&mut self, ctx: &Context, palette: Palette) {
+    fn wide_live_panel(&mut self, ui: &mut EguiUi, palette: Palette) {
         let mut force_refresh = false;
-        let targets = self.poll_listener_stats(ctx, false);
+        let ctx = ui.ctx().clone();
+        let targets = self.poll_listener_stats(&ctx, false);
 
-        egui::SidePanel::right("wide_live_panel")
+        egui::Panel::right("wide_live_panel")
             .resizable(false)
-            .exact_width(288.0)
+            .exact_size(288.0)
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
                     .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(14, 12)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
@@ -900,24 +901,24 @@ impl Ui {
             });
 
         if force_refresh {
-            let _ = self.poll_listener_stats(ctx, true);
+            let _ = self.poll_listener_stats(&ctx, true);
         }
     }
 
-    fn source_master_rail(&mut self, ctx: &Context, palette: Palette) {
+    fn source_master_rail(&mut self, ui: &mut EguiUi, palette: Palette) {
         let mut open_settings_id = None;
         let mut add_new_source = false;
 
-        egui::SidePanel::left("source_master_rail")
+        egui::Panel::left("source_master_rail")
             .resizable(false)
-            .exact_width(214.0)
+            .exact_size(214.0)
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
                     .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(12, 12)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(strong_text("Ljudkällor", FONT_TITLE_S, palette.text_primary));
                     crate::guide::tip(
@@ -1027,7 +1028,7 @@ impl Ui {
                                 });
                             let hit = ui.interact(
                                 frame_resp.response.rect,
-                                ui.id().with(("master-source", source.id)),
+                                ui.scope_id().with(("master-source", source.id)),
                                 Sense::click(),
                             );
                             if hit.clicked() && !selected {
@@ -1060,7 +1061,7 @@ impl Ui {
         }
     }
 
-    fn source_live_control_panel(&mut self, ctx: &Context, palette: Palette) {
+    fn source_live_control_panel(&mut self, ui: &mut EguiUi, palette: Palette) {
         let Some(source) = self
             .settings
             .sources
@@ -1088,18 +1089,18 @@ impl Ui {
         let mut toggle_record = false;
         let mut reset_clip_channel: Option<usize> = None;
 
-        let targets = self.poll_listener_stats(ctx, false);
+        let targets = self.poll_listener_stats(ui.ctx(), false);
 
-        egui::SidePanel::right("source_live_control")
+        egui::Panel::right("source_live_control")
             .resizable(false)
-            .exact_width(236.0)
+            .exact_size(236.0)
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
                     .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(14, 12)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.label(strong_text(
                     "Live-kontroll",
                     FONT_TITLE_S,
@@ -1294,7 +1295,7 @@ impl Ui {
         let label = toast.label.clone();
         let mut trigger_undo = false;
         let mut dismiss = false;
-        egui::Area::new(egui::Id::new("undo-toast"))
+        egui::Area::new(egui::Id::unique("undo-toast"))
             .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -16.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -1486,7 +1487,7 @@ impl Ui {
         let mut confirmed = false;
         let mut cancelled = false;
         let closing = matches!(kind, StopConfirm::Close { .. });
-        let modal = egui::Modal::new(egui::Id::new(("confirm-stop-modal", closing)))
+        let modal = egui::Modal::new(egui::Id::unique(("confirm-stop-modal", closing)))
             .frame(
                 Frame::new()
                     .fill(palette.card_bg)
@@ -1496,7 +1497,7 @@ impl Ui {
                     .shadow(palette.card_shadow),
             )
             .show(ctx, |ui| {
-                ui.set_width((ctx.screen_rect().width() - 60.0).clamp(1.0, 360.0));
+                ui.set_width((ctx.content_rect().width() - 60.0).clamp(1.0, 360.0));
                 ui.label(strong_text(title, 16.0, palette.text_primary));
                 ui.add_space(6.0);
                 ui.label(RichText::new(&body).color(palette.text_secondary));
@@ -1577,7 +1578,7 @@ impl Ui {
                     apply_theme_preference(ui.ctx(), pref);
                     self.save_state.changed(Instant::now());
                 }
-                ui.close_menu();
+                ui.close();
             }
         }
     }
@@ -1675,7 +1676,7 @@ impl Ui {
 
                 // Theme selector popover
                 let theme_popup_id = ui.make_persistent_id("theme-selector-popup");
-                let theme_open = ui.memory(|m| m.is_popup_open(theme_popup_id));
+                let theme_open = egui::Popup::is_id_open(ui.ctx(), theme_popup_id);
                 let theme_btn = icon_button(
                     ui,
                     Icon::Theme,
@@ -1685,19 +1686,13 @@ impl Ui {
                     palette,
                     "Välj utseende (System / Ljust / Mörkt)",
                 );
-                if theme_btn.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(theme_popup_id));
-                }
-                egui::popup_below_widget(
-                    ui,
-                    theme_popup_id,
-                    &theme_btn,
-                    egui::PopupCloseBehavior::CloseOnClickOutside,
-                    |ui| {
+                egui::Popup::from_toggle_button_response(&theme_btn)
+                    .id(theme_popup_id)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                         ui.set_min_width(148.0);
                         self.theme_menu_contents(ui, palette);
-                    },
-                );
+                    });
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1707,7 +1702,7 @@ impl Ui {
                 // Overflow menu on narrow docked windows
                 if narrow {
                     let overflow_id = ui.make_persistent_id("narrow-overflow-popup");
-                    let overflow_open = ui.memory(|m| m.is_popup_open(overflow_id));
+                    let overflow_open = egui::Popup::is_id_open(ui.ctx(), overflow_id);
                     let more_btn = icon_button(
                         ui,
                         Icon::More,
@@ -1717,15 +1712,10 @@ impl Ui {
                         palette,
                         "Fler alternativ",
                     );
-                    if more_btn.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(overflow_id));
-                    }
-                    egui::popup_below_widget(
-                        ui,
-                        overflow_id,
-                        &more_btn,
-                        egui::PopupCloseBehavior::CloseOnClickOutside,
-                        |ui| {
+                    egui::Popup::from_toggle_button_response(&more_btn)
+                        .id(overflow_id)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
                             ui.set_min_width(176.0);
                             let help = crate::guide::enabled(ui.ctx());
                             if ui
@@ -1740,13 +1730,13 @@ impl Ui {
                                 .clicked()
                             {
                                 crate::guide::set_enabled(ui.ctx(), !help);
-                                ui.close_menu();
+                                ui.close();
                             }
                             let showing_stats = self.view == View::ListenerStats;
                             if ui
                                 .add_enabled(
                                     self.load_error.is_none(),
-                                    egui::SelectableLabel::new(showing_stats, "Lyssnarstatistik"),
+                                    egui::Button::selectable(showing_stats, "Lyssnarstatistik"),
                                 )
                                 .clicked()
                             {
@@ -1755,12 +1745,11 @@ impl Ui {
                                 } else {
                                     View::ListenerStats
                                 });
-                                ui.close_menu();
+                                ui.close();
                             }
                             ui.separator();
                             self.theme_menu_contents(ui, palette);
-                        },
-                    );
+                        });
                 }
 
                 let show_group_names = !narrow && ui.available_width() >= 550.0;
@@ -1900,7 +1889,7 @@ impl Ui {
             ui.add_space(SPACE_M);
             ScrollArea::vertical()
                 .id_salt("app-errors")
-                .max_height(ui.ctx().screen_rect().height() * 0.30)
+                .max_height(ui.ctx().content_rect().height() * 0.30)
                 .show(ui, |ui| self.app_errors(ui, palette));
         }
     }
@@ -2009,9 +1998,10 @@ impl eframe::App for Ui {
         }
     }
 
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        let palette = Palette::for_theme(ctx.style().visuals.dark_mode);
-        let screen_width = ctx.screen_rect().width();
+    fn ui(&mut self, ui: &mut EguiUi, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let palette = Palette::for_theme(ctx.global_style().visuals.dark_mode);
+        let screen_width = ctx.content_rect().width();
         let mode = LayoutMode::from_width(screen_width);
 
         self.connection_tester.poll();
@@ -2020,10 +2010,10 @@ impl eframe::App for Ui {
         let closing = ctx.input(|input| input.viewport().close_requested());
         if !closing {
             self.collect_recordings();
-            self.handle_shortcuts(ctx);
+            self.handle_shortcuts(&ctx);
         }
 
-        egui::TopBottomPanel::top("header")
+        egui::Panel::top("header")
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
@@ -2033,7 +2023,7 @@ impl eframe::App for Ui {
                     ))
                     .stroke(Stroke::new(1.0_f32, palette.card_border)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 self.header(ui, mode, palette);
             });
 
@@ -2051,13 +2041,13 @@ impl eframe::App for Ui {
             && self.selected_source.is_some();
 
         if show_wide_live_panel {
-            self.wide_live_panel(ctx, palette);
+            self.wide_live_panel(ui, palette);
         }
         if show_master_rail {
-            self.source_master_rail(ctx, palette);
+            self.source_master_rail(ui, palette);
         }
         if show_live_control_panel {
-            self.source_live_control_panel(ctx, palette);
+            self.source_live_control_panel(ui, palette);
         }
 
         egui::CentralPanel::default()
@@ -2069,7 +2059,7 @@ impl eframe::App for Ui {
                         12,
                     )),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 if self.load_error.is_some() {
                     ScrollArea::vertical().show(ui, |ui| self.load_error_page(ui));
                     return;
@@ -2719,20 +2709,20 @@ impl eframe::App for Ui {
             });
 
         let guard_close =
-            closing && guard_active_close(ctx, self.close_confirmed, self.has_active_outputs());
+            closing && guard_active_close(&ctx, self.close_confirmed, self.has_active_outputs());
         if guard_close {
             self.confirm_stop = Some(StopConfirm::Close {
                 discard_changes: false,
             });
         }
         if self.confirm_stop.is_some() {
-            self.stop_confirm_modal(ctx, palette);
+            self.stop_confirm_modal(&ctx, palette);
         } else if let Some(recording) = self.saved_recordings.front_mut() {
-            if recording.show(ctx) {
+            if recording.show(&ctx) {
                 self.saved_recordings.pop_front();
             }
         } else {
-            self.undo_toast_overlay(ctx, palette);
+            self.undo_toast_overlay(&ctx, palette);
         }
 
         let closing = closing && !guard_close;
@@ -2846,7 +2836,7 @@ fn listener_stats_page(
                         15.0,
                         palette.text_primary,
                     ));
-                    let issue_id = egui::Id::new(("stats-error", destination.id));
+                    let issue_id = egui::Id::unique(("stats-error", destination.id));
                     let target = match target {
                         Ok(target) => target,
                         Err(error) => {
@@ -3406,7 +3396,7 @@ fn centered_column(ui: &mut EguiUi, max_width: f32, add_contents: impl FnOnce(&m
             Pos2::new(avail_rect.left() + side, avail_rect.top()),
             Pos2::new(avail_rect.left() + side + max_width, avail_rect.bottom()),
         );
-        ui.allocate_new_ui(
+        ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(centered_rect)
                 .layout(Layout::top_down(Align::Min)),
@@ -3578,7 +3568,7 @@ fn source_status_notices(
     live: &crate::engine::LiveStatus,
     palette: Palette,
 ) {
-    let source_id = egui::Id::new(("source-feedback", source.id));
+    let source_id = egui::Id::unique(("source-feedback", source.id));
     let input_hint = (!live.present).then(|| {
         let consequence = match (streaming, recording) {
             (true, true) => "Sändningen och inspelningen får tyst ljud. ",
@@ -4121,8 +4111,7 @@ fn icon_button(
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, is_enabled, tooltip));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, is_enabled, tooltip));
 
     let (bg, border, fg) = if !is_enabled {
         (
@@ -4209,9 +4198,7 @@ fn render_button_sized(
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, spec.height), sense);
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, is_enabled, spec.label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, is_enabled, spec.label));
 
     let icon_color = spec.icon.map_or(palette.text_primary, |(_, color)| color);
     let (bg, border, text_color, fg_icon) = if is_saved {
@@ -4450,12 +4437,7 @@ fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) ->
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            label,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
 
     let (bg, border, text_color) = if selected {
@@ -6772,7 +6754,7 @@ fn col_box(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_ui::click_button;
+    use crate::test_ui::{click_button, run_ui};
 
     #[test]
     fn stop_confirmation_fits_after_resizing_to_minimum_width() {
@@ -6782,7 +6764,7 @@ mod tests {
         app.confirm_stop = Some(StopConfirm::Close {
             discard_changes: false,
         });
-        let id = egui::Id::new(("confirm-stop-modal", true));
+        let id = egui::Id::unique(("confirm-stop-modal", true));
         for width in [1200.0, 420.0] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 600.0));
             for _ in 0..2 {
@@ -6790,8 +6772,8 @@ mod tests {
                     screen_rect: Some(screen),
                     ..Default::default()
                 };
-                let _ = ctx.run(input, |ctx| {
-                    app.stop_confirm_modal(ctx, Palette::for_theme(true))
+                let _ = run_ui(&ctx, input, |ui| {
+                    app.stop_confirm_modal(ui.ctx(), Palette::for_theme(true))
                 });
             }
             let dialog = ctx.memory(|m| m.area_rect(id)).unwrap();
@@ -6811,8 +6793,8 @@ mod tests {
             (true, true, false),
             (false, false, false),
         ] {
-            let output = ctx.run(Default::default(), |ctx| {
-                assert_eq!(guard_active_close(ctx, confirmed, active), blocked);
+            let output = run_ui(&ctx, Default::default(), |ui| {
+                assert_eq!(guard_active_close(ui.ctx(), confirmed, active), blocked);
             });
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
             assert_eq!(
@@ -6840,7 +6822,7 @@ mod tests {
             app.save_state = SaveState::Failed("disk full".into());
             app.confirm_stop = Some(StopConfirm::Close { discard_changes });
             app.close_confirmed = false;
-            let output = click_button(&ctx, button, |ctx| app.stop_confirm_modal(ctx, palette));
+            let output = click_button(&ctx, button, |ui| app.stop_confirm_modal(ui.ctx(), palette));
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
             assert_eq!(
                 commands.contains(&egui::ViewportCommand::Close),
@@ -6862,7 +6844,6 @@ mod tests {
         );
         let press_shortcut = |app: &mut Ui| {
             let input = egui::RawInput {
-                modifiers: NEW_SOURCE_SHORTCUT.modifiers,
                 events: vec![egui::Event::Key {
                     key: NEW_SOURCE_SHORTCUT.logical_key,
                     physical_key: None,
@@ -6872,7 +6853,7 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| app.handle_shortcuts(ctx));
+            let _ = run_ui(&ctx, input, |ui| app.handle_shortcuts(ui.ctx()));
         };
 
         app.confirm_stop = Some(StopConfirm::Recordings);
@@ -6918,8 +6899,8 @@ mod tests {
             ("Skapa och välj", true),
         ] {
             let mut changed = false;
-            click_button(&ctx, button, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            click_button(&ctx, button, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     changed |= source_settings(
                         ui,
                         &mut source,
@@ -7028,8 +7009,8 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 720.0))),
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = run_ui(&ctx, input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let right = ui.max_rect().right();
                     ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -7065,9 +7046,9 @@ mod tests {
         configure_fonts(&ctx);
         ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
         ctx.set_visuals_of(egui::Theme::Light, build_visuals(false));
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            let palette = Palette::for_theme(ctx.style().visuals.dark_mode);
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_ui(&ctx, egui::RawInput::default(), |ui| {
+            let palette = Palette::for_theme(ui.ctx().global_style().visuals.dark_mode);
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.label(strong_text("Mötessändare", 18.0, palette.text_primary));
                 let _ = tab_button(ui, "Översikt", true, palette);
             });
@@ -7086,15 +7067,15 @@ mod tests {
         let mut rects = [Rect::NOTHING; 4];
         let mut count_rects = [Rect::NOTHING; 2];
         let mut ids = [egui::Id::NULL; 4];
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(true);
-            egui::TopBottomPanel::top("header")
+            egui::Panel::top("header")
                 .frame(
                     Frame::new()
                         .fill(palette.header_bg)
                         .inner_margin(Margin::symmetric(16, 10)),
                 )
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.set_min_height(36.0);
                         ui.label(strong_text("Mötessändare", 18.0, palette.text_primary));
@@ -7209,9 +7190,9 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(560.0, 480.0))),
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(false);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let levels = [
                     MeterLevel {
                         signal: 0.5,
@@ -7342,22 +7323,23 @@ mod tests {
     fn meter_scale_labels_never_overlap_at_min_or_narrow_widths() {
         let ctx = Context::default();
         configure_fonts(&ctx);
-        ctx.style_mut(|style| {
+        ctx.global_style_mut(|style| {
             style.spacing.item_spacing = Vec2::new(10.0, 8.0);
             style.spacing.interact_size.y = 28.0;
         });
         let font_id = FontId::proportional(9.5);
         let mut widths = Vec::new();
-        let output = ctx.run(
+        let output = run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(560.0, 480.0))),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let palette = Palette::for_theme(true);
                 egui::CentralPanel::default()
                     .frame(Frame::new().inner_margin(Margin::symmetric(16, 12)))
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         card_frame(palette, palette.card_border).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             meter(
@@ -7460,14 +7442,13 @@ mod tests {
             if use_system_fonts {
                 configure_fonts(&ctx);
             }
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                ctx.fonts(|fonts| {
+            let _ = run_ui(&ctx, egui::RawInput::default(), |ui| {
+                ui.ctx().fonts_mut(|fonts| {
                     let prop = FontId::proportional(13.5);
                     let mono = FontId::monospace(12.0);
-                    let mut lock = fonts.lock();
                     for ch in ['Ö', 'ä', 'å', 'ö', '·', '–', '…'] {
                         assert!(
-                            lock.fonts.font(&prop).has_glyph(ch),
+                            fonts.has_glyph(&prop, ch),
                             "missing proportional glyph U+{:04X} ({ch:?}) (system_fonts={use_system_fonts})",
                             ch as u32
                         );
@@ -7476,7 +7457,7 @@ mod tests {
                         let strong = FontId::new(15.5, FontFamily::Name(STRONG_FONT.into()));
                         for ch in ['Ö', 'ä', 'å', 'ö'] {
                             assert!(
-                                lock.fonts.font(&strong).has_glyph(ch),
+                                fonts.has_glyph(&strong, ch),
                                 "missing strong glyph U+{:04X} ({ch:?})",
                                 ch as u32
                             );
@@ -7484,7 +7465,7 @@ mod tests {
                     }
                     for ch in ['−', '∞'] {
                         assert!(
-                            lock.fonts.font(&mono).has_glyph(ch),
+                            fonts.has_glyph(&mono, ch),
                             "missing monospace glyph U+{:04X} ({ch:?}) (system_fonts={use_system_fonts})",
                             ch as u32
                         );
@@ -7526,14 +7507,15 @@ mod tests {
         configure_fonts(&ctx);
         ctx.set_visuals_of(egui::Theme::Dark, build_visuals(true));
         let mut button_rect = Rect::NOTHING;
-        let _ = ctx.run(
+        let _ = run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let palette = Palette::for_theme(true);
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let resp = with_disabled_reason(
                         action_button(
                             ui,
@@ -7554,16 +7536,17 @@ mod tests {
         assert!(button_rect.width() > 0.0);
 
         let mut hovered = false;
-        let output = ctx.run(
+        let output = run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
                 events: vec![egui::Event::PointerMoved(button_rect.center())],
                 time: Some(2.0),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let palette = Palette::for_theme(true);
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let resp = with_disabled_reason(
                         action_button(
                             ui,
@@ -7606,9 +7589,9 @@ mod tests {
 
         let mut id_a = egui::Id::NULL;
         let mut id_b = egui::Id::NULL;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = run_ui(&ctx, egui::RawInput::default(), |ui| {
             let palette = Palette::for_theme(true);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.push_id(dest_a.id, |ui| {
                     destination_settings(ui, &mut dest_a, false, palette);
                     id_a = ui.make_persistent_id("show-password");
@@ -7620,17 +7603,17 @@ mod tests {
             });
         });
         assert_ne!(id_a, id_b);
-        let _ = ctx.run(Default::default(), |ctx| {
-            assert!(!password_visible(ctx, id_a));
-            toggle_password(ctx, id_a, false);
+        let _ = run_ui(&ctx, Default::default(), |ui| {
+            assert!(!password_visible(ui.ctx(), id_a));
+            toggle_password(ui.ctx(), id_a, false);
         });
-        let _ = ctx.run(Default::default(), |ctx| {
-            assert!(password_visible(ctx, id_a));
-            assert!(!password_visible(ctx, id_b));
+        let _ = run_ui(&ctx, Default::default(), |ui| {
+            assert!(password_visible(ui.ctx(), id_a));
+            assert!(!password_visible(ui.ctx(), id_b));
         });
-        let _ = ctx.run(Default::default(), |_| {}); // The editor was closed.
-        let _ = ctx.run(Default::default(), |ctx| {
-            assert!(!password_visible(ctx, id_a))
+        let _ = run_ui(&ctx, Default::default(), |_| {}); // The editor was closed.
+        let _ = run_ui(&ctx, Default::default(), |ui| {
+            assert!(!password_visible(ui.ctx(), id_a))
         });
     }
 
@@ -7669,11 +7652,11 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 600.0))),
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(true);
             egui::CentralPanel::default()
                 .frame(Frame::new().inner_margin(Margin::symmetric(10, 12)))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     let right = ui.max_rect().right();
                     source_card(
                         ui,
@@ -7872,6 +7855,9 @@ mod tests {
             load_error: None,
         };
 
+        app.listener_stats
+            .seed_loading_for_test("http://localhost:8000");
+
         for view in [View::Overview, View::SourceSettings, View::Destinations] {
             app.view = view;
             for width in [420.0_f32, 700.0, 1360.0] {
@@ -7879,20 +7865,20 @@ mod tests {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 760.0))),
                     ..Default::default()
                 };
-                let output = ctx.run(input, |ctx| {
-                    let palette = Palette::for_theme(ctx.style().visuals.dark_mode);
-                    let mode = LayoutMode::from_width(ctx.screen_rect().width());
-                    egui::TopBottomPanel::top("header").show(ctx, |ui| {
+                let output = run_ui(&ctx, input, |ui| {
+                    let palette = Palette::for_theme(ui.ctx().global_style().visuals.dark_mode);
+                    let mode = LayoutMode::from_width(ui.ctx().content_rect().width());
+                    egui::Panel::top("header").show(ui, |ui| {
                         app.header(ui, mode, palette);
                     });
                     if view == View::SourceSettings && width >= MASTER_DETAIL_LEFT_WIDTH {
-                        app.source_master_rail(ctx, palette);
+                        app.source_master_rail(ui, palette);
                     }
                     if view == View::SourceSettings && width >= MASTER_DETAIL_RIGHT_WIDTH {
-                        app.source_live_control_panel(ctx, palette);
+                        app.source_live_control_panel(ui, palette);
                     }
                     if view == View::Overview && mode == LayoutMode::Wide {
-                        app.wide_live_panel(ctx, palette);
+                        app.wide_live_panel(ui, palette);
                     }
                 });
                 assert!(
@@ -7914,8 +7900,8 @@ mod tests {
             ..Default::default()
         };
         let mut inner_spacing_x = 0.0;
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_ui(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 centered_column(ui, FORM_MAX_WIDTH, |ui| {
                     inner_spacing_x = ui.spacing().item_spacing.x;
                 });
@@ -7944,9 +7930,9 @@ mod tests {
             ..Default::default()
         };
         let mut stats_height = 0.0;
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(true);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let rect = ui
                     .scope(|ui| {
                         centered_column(ui, FORM_MAX_WIDTH, |ui| {
@@ -7972,8 +7958,8 @@ mod tests {
             ..Default::default()
         };
         let mut content_height = 0.0;
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_ui(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let output = ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -8002,9 +7988,9 @@ mod tests {
         };
         let mut pill_right = 0.0;
         let mut clip_right = 0.0;
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(true);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 clip_right = ui.clip_rect().right();
                 let resp = ui.scope(|ui| {
                     wrapping_dot_pill(
@@ -8052,9 +8038,9 @@ mod tests {
         let mut compact_rect = Rect::NOTHING;
         let mut regular_rect = Rect::NOTHING;
         let mut clip_right = 0.0;
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_ui(&ctx, input, |ui| {
             let palette = Palette::for_theme(true);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 clip_right = ui.clip_rect().right();
                 compact_rect = ui
                     .scope(|ui| {
@@ -8120,8 +8106,8 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 300.0))),
                 ..Default::default()
             };
-            let output = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let output = run_ui(&ctx, input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     source_card(
                         ui,
                         &engine,
@@ -8247,13 +8233,16 @@ mod tests {
             engine,
             None,
         );
-        let output = ctx.run(
+        app.listener_stats
+            .seed_loading_for_test("http://example.invalid:8000");
+        let output = run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 760.0))),
                 ..Default::default()
             },
-            |ctx| {
-                app.source_live_control_panel(ctx, Palette::for_theme(true));
+            |ui| {
+                app.source_live_control_panel(ui, Palette::for_theme(true));
             },
         );
         let pill_fill = Palette::for_theme(true).warn_pill_bg;

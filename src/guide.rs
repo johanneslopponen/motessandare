@@ -1,7 +1,7 @@
 use eframe::egui::{Context, Id, Label, Ui};
 
 fn mode_id() -> Id {
-    Id::new("contextual-help")
+    Id::unique("contextual-help")
 }
 
 pub fn enabled(ctx: &Context) -> bool {
@@ -39,8 +39,8 @@ mod tests {
         let ctx = Context::default();
         set_enabled(&ctx, true);
         let mut center = Pos2::ZERO;
-        let _ = ctx.run(RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = crate::test_ui::run_ui(&ctx, RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let group = ui.scope(|ui| tip(ui, "Välj din mikrofon."));
                 center = group.response.rect.center();
             });
@@ -56,13 +56,14 @@ mod tests {
                     modifiers: Default::default(),
                 },
             ];
-            let output = ctx.run(
+            let output = crate::test_ui::run_ui(
+                &ctx,
                 RawInput {
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         ui.scope(|ui| tip(ui, "Välj din mikrofon."));
                     });
                 },
