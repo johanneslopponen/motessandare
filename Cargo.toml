@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+fuzzing = []
+
 [dependencies]
 base64 = "0.22"
 cpal = "=0.18.2"

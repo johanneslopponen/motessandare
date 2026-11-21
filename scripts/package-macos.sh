@@ -17,7 +17,8 @@ output_dir="$(cd "$output_dir" && pwd)"
 prefix="$work/deps"
 jobs="$(sysctl -n hw.logicalcpu)"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
-export CC="$(xcrun --find clang)"
+CC="$(xcrun --find clang)"
+export CC
 export PKG_CONFIG_PATH=""
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 

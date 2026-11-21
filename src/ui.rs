@@ -1222,10 +1222,8 @@ impl Ui {
                             .position(|d| d.id == *dest_id)
                         {
                             let dest = &self.settings.destinations[pos];
-                            let target_status = live
-                                .targets
-                                .iter()
-                                .find(|ts| ts.destination_id == *dest_id);
+                            let target_status =
+                                live.targets.iter().find(|ts| ts.destination_id == *dest_id);
                             let listener_text = targets
                                 .get(pos)
                                 .and_then(|t| t.as_ref().ok())
@@ -6646,10 +6644,7 @@ fn server_hint(value: &str) -> Option<&'static str> {
     match url::Url::parse(value) {
         Ok(url) if url.port() == Some(0) => Some("Ange en port mellan 1 och 65535."),
         Err(url::ParseError::InvalidPort) => Some("Ange en port mellan 1 och 65535."),
-        Ok(url)
-            if url.has_host()
-                && url.port_or_known_default().is_some_and(|port| port > 0) =>
-        {
+        Ok(url) if url.has_host() && url.port_or_known_default().is_some_and(|port| port > 0) => {
             None
         }
         _ => Some("Kontrollera serverns värdnamn eller IP-adress."),
@@ -6955,7 +6950,16 @@ mod tests {
         ] {
             assert!(server_hint(server).is_some(), "{server}");
         }
-        for mount in ["", "/", "/.", "/..", "/a/../", "live.opus", "/live?token", "/live#fragment"] {
+        for mount in [
+            "",
+            "/",
+            "/.",
+            "/..",
+            "/a/../",
+            "live.opus",
+            "/live?token",
+            "/live#fragment",
+        ] {
             assert!(mount_hint(mount).is_some(), "{mount}");
         }
         assert!(mount_hint("/möten/live.opus").is_none());
@@ -8088,7 +8092,16 @@ mod tests {
             let output = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     source_card(
-                        ui, &engine, &source, &[], true, true, true, true, false, palette,
+                        ui,
+                        &engine,
+                        &source,
+                        &[],
+                        true,
+                        true,
+                        true,
+                        true,
+                        false,
+                        palette,
                     );
                 });
             });
@@ -8102,8 +8115,12 @@ mod tests {
                 .collect();
             let pills: Vec<_> = rects
                 .filter(|rect| {
-                    [palette.pill_bg, palette.stream_pill_bg, palette.record_pill_bg]
-                        .contains(&rect.fill)
+                    [
+                        palette.pill_bg,
+                        palette.stream_pill_bg,
+                        palette.record_pill_bg,
+                    ]
+                    .contains(&rect.fill)
                 })
                 .collect();
             assert_eq!(buttons.len(), 3);
@@ -8143,22 +8160,29 @@ mod tests {
             ..Destination::default()
         };
         let summary = destination_summary(&dest);
-        assert!(!summary.contains("secret") && !summary.contains("token=abc"), "{summary}");
+        assert!(
+            !summary.contains("secret") && !summary.contains("token=abc"),
+            "{summary}"
+        );
 
         let palette = Palette::for_theme(true);
         let bad_rect = Rect::from_min_size(Pos2::new(f32::NAN, 0.0), Vec2::new(100.0, 10.0));
-        assert!(build_meter_gradient_mesh(bad_rect, 0.5, palette).vertices.is_empty());
-        assert!(build_meter_gradient_mesh(
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 10.0)),
-            f32::NAN,
-            palette,
-        )
-        .vertices
-        .is_empty());
-        assert!(layout_meter_scale_labels(f32::NAN, 100.0, &[(-6.0, 10.0)], 4.0).is_empty());
         assert!(
-            layout_meter_scale_labels(0.0, 100.0, &[(-6.0, f32::NAN)], 4.0).is_empty()
+            build_meter_gradient_mesh(bad_rect, 0.5, palette)
+                .vertices
+                .is_empty()
         );
+        assert!(
+            build_meter_gradient_mesh(
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 10.0)),
+                f32::NAN,
+                palette,
+            )
+            .vertices
+            .is_empty()
+        );
+        assert!(layout_meter_scale_labels(f32::NAN, 100.0, &[(-6.0, 10.0)], 4.0).is_empty());
+        assert!(layout_meter_scale_labels(0.0, 100.0, &[(-6.0, f32::NAN)], 4.0).is_empty());
     }
 
     #[test]
@@ -8202,8 +8226,11 @@ mod tests {
             },
         );
         let pill_fill = Palette::for_theme(true).warn_pill_bg;
-        assert!(output.shapes.iter().any(|s| {
-            matches!(&s.shape, egui::Shape::Rect(rect) if rect.fill == pill_fill)
-        }));
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| { matches!(&s.shape, egui::Shape::Rect(rect) if rect.fill == pill_fill) })
+        );
     }
 }

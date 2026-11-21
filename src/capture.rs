@@ -324,9 +324,9 @@ fn input_configs(
         .filter(|&rate| rate > 0)
         .unwrap_or(48_000);
     let mut configs = Vec::new();
-    if let Some(config) = default
-        .filter(|config| config.channels() > 0 && config.sample_rate() > 0 && pcm(config.sample_format()))
-    {
+    if let Some(config) = default.filter(|config| {
+        config.channels() > 0 && config.sample_rate() > 0 && pcm(config.sample_format())
+    }) {
         configs.push(config);
     }
     configs.extend(ranges.into_iter().filter_map(|range| {
@@ -465,6 +465,25 @@ where
     }
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_reader(channels: usize, minimum_frames: usize, rate: u32) -> Reader {
+    Reader {
+        ring: Arc::new(AudioRing::new(channels, minimum_frames)),
+        channels,
+        rate,
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_push_f32(reader: &Reader, samples: &[f32]) {
+    reader.ring.push(samples);
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_push_i16(reader: &Reader, samples: &[i16]) {
+    reader.ring.push(samples);
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{AudioRing, Reader, input_configs};
@@ -572,7 +591,8 @@ pub(crate) mod tests {
     #[test]
     fn skips_inverted_or_zero_rate_ranges_and_handles_degenerate_rings() {
         let buffer = SupportedBufferSize::Unknown;
-        let inverted = SupportedStreamConfigRange::new(2, 96_000, 44_100, buffer, SampleFormat::F32);
+        let inverted =
+            SupportedStreamConfigRange::new(2, 96_000, 44_100, buffer, SampleFormat::F32);
         let zero_rate = SupportedStreamConfigRange::new(2, 0, 0, buffer, SampleFormat::F32);
         let valid = SupportedStreamConfigRange::new(2, 44_100, 96_000, buffer, SampleFormat::F32);
         let bad_default = SupportedStreamConfig::new(2, 0, buffer, SampleFormat::F32);

@@ -1,4 +1,4 @@
-mod credentials;
+pub(crate) mod credentials;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -241,7 +241,7 @@ fn repair_ids<T>(items: &mut [T], id_of: impl Fn(&mut T) -> &mut u64) {
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
-struct RawSource {
+pub(crate) struct RawSource {
     id: u64,
     name: String,
     device: String,
@@ -271,25 +271,25 @@ impl Default for RawSource {
 }
 
 #[derive(Deserialize)]
-struct RawSettingsObject {
+pub(crate) struct RawSettingsObject {
     credential_account: Option<String>,
-    compact_overview: Option<bool>,
+    pub(crate) compact_overview: Option<bool>,
     #[serde(default)]
-    theme: ThemePreference,
+    pub(crate) theme: ThemePreference,
     #[serde(default)]
-    destinations: Vec<Destination>,
+    pub(crate) destinations: Vec<Destination>,
     #[serde(default)]
-    sources: Vec<RawSource>,
+    pub(crate) sources: Vec<RawSource>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum StoredSettings {
+pub(crate) enum StoredSettings {
     Object(RawSettingsObject),
     LegacyArray(Vec<RawSource>),
 }
 
-fn migrate_raw(
+pub(crate) fn migrate_raw(
     destinations: Vec<Destination>,
     raw_sources: Vec<RawSource>,
     compact_overview: Option<bool>,
@@ -408,10 +408,7 @@ fn settings_dir(path: &Path) -> Result<&Path, String> {
         .ok_or_else(|| {
             settings_file_error(
                 path,
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "missing parent directory",
-                ),
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory"),
             )
         })
 }
@@ -861,7 +858,11 @@ mod tests {
                 server: input.into(),
                 ..Destination::default()
             };
-            assert_eq!(dest.server_without_secrets().as_deref(), expected, "{input}");
+            assert_eq!(
+                dest.server_without_secrets().as_deref(),
+                expected,
+                "{input}"
+            );
             if let Some(cleaned) = expected {
                 let rerun = Destination {
                     server: cleaned.into(),
@@ -906,8 +907,14 @@ mod tests {
 
         for bad in [Path::new(""), Path::new("/"), Path::new("sources.json")] {
             assert!(load_test_settings(bad).is_err(), "{bad:?}");
-            assert!(save_test_settings(bad, &Settings::default()).is_err(), "{bad:?}");
-            assert!(write_settings(bad, &serde_json::json!({})).is_err(), "{bad:?}");
+            assert!(
+                save_test_settings(bad, &Settings::default()).is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                write_settings(bad, &serde_json::json!({})).is_err(),
+                "{bad:?}"
+            );
         }
     }
 }

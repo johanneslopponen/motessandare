@@ -511,7 +511,10 @@ fn rejects_dot_segment_mounts_invalid_servers_control_users_and_bad_rates() {
             bitrate,
             ..Destination::default()
         };
-        assert!(stream_command(&bad, 1, &target, tls).is_err(), "opus {bitrate}");
+        assert!(
+            stream_command(&bad, 1, &target, tls).is_err(),
+            "opus {bitrate}"
+        );
     }
     for bitrate in [0, 31, 321] {
         let bad = Destination {
@@ -519,7 +522,10 @@ fn rejects_dot_segment_mounts_invalid_servers_control_users_and_bad_rates() {
             bitrate,
             ..Destination::default()
         };
-        assert!(stream_command(&bad, 1, &target, tls).is_err(), "mp3 {bitrate}");
+        assert!(
+            stream_command(&bad, 1, &target, tls).is_err(),
+            "mp3 {bitrate}"
+        );
     }
 }
 
@@ -531,7 +537,9 @@ fn sanitizes_windows_reserved_stems_and_keeps_utc_dates_monotonic() {
     }
     let a = utc_from_unix(u64::MAX - 86_400);
     let b = utc_from_unix(u64::MAX);
-    assert!((a.year, a.month, a.day, a.hour, a.minute, a.second)
-        < (b.year, b.month, b.day, b.hour, b.minute, b.second));
+    assert!(
+        (a.year, a.month, a.day, a.hour, a.minute, a.second)
+            < (b.year, b.month, b.day, b.hour, b.minute, b.second)
+    );
     assert!(a.year > 0 && b.year > 0);
 }

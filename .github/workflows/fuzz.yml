@@ -1,0 +1,111 @@
+name: Fuzzing
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: 'Fuzz duration per target in seconds'
+        required: false
+        type: string
+        default: '120'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_icecast_stats
+          - fuzz_settings_load
+          - fuzz_stream_target
+          - fuzz_recording_filename
+          - fuzz_audio_pipeline
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+          prefix-key: v1-fuzz
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-binstall
+
+      - name: Install cargo-fuzz
+        run: cargo binstall --no-confirm cargo-fuzz
+
+      - name: Run fuzz target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DURATION: ${{ inputs.duration_seconds }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            schedule)
+              DURATION=300
+              ;;
+            workflow_dispatch)
+              if [[ "$INPUT_DURATION" =~ ^[0-9]+$ ]] && [ "$INPUT_DURATION" -gt 0 ]; then
+                DURATION="$INPUT_DURATION"
+              else
+                echo "Invalid duration_seconds: $INPUT_DURATION" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              DURATION=30
+              ;;
+          esac
+          cargo +nightly fuzz run "$TARGET" -- -max_total_time="$DURATION" -rss_limit_mb=2048
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 14
