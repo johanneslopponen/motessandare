@@ -41,13 +41,53 @@ impl Destination {
     // Publishing uses only the HTTP origin. Drop pasted URL credentials and
     // tokens before the server field is persisted or shown in a summary.
     pub fn server_without_secrets(&self) -> Option<String> {
-        let url = url::Url::parse(self.server.trim()).ok()?;
-        (matches!(url.scheme(), "http" | "https")
-            && (!url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()))
-        .then(|| url.origin().ascii_serialization())
+        let trimmed = self.server.trim();
+        let parsed = url::Url::parse(trimmed);
+        if let Ok(mut url) = parsed {
+            if matches!(url.scheme(), "http" | "https") {
+                return (!url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some())
+                .then(|| url.origin().ascii_serialization());
+            }
+            if !url.cannot_be_a_base() {
+                let had_secrets = !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some();
+                if !had_secrets {
+                    return None;
+                }
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_query(None);
+                url.set_fragment(None);
+                let cleaned = url.to_string();
+                return (cleaned != trimmed).then_some(cleaned);
+            }
+            let prefix = format!("{}:", url.scheme());
+            let rest = &trimmed[prefix.len()..];
+            let without_qf = rest.split(['?', '#']).next().unwrap_or("");
+            let clean_rest = match without_qf.rsplit_once('@') {
+                Some((_, after)) => after,
+                None => without_qf,
+            };
+            let cleaned = format!("{prefix}{clean_rest}");
+            return (cleaned != trimmed).then_some(cleaned);
+        }
+        let (prefix, rest) = if let Some((scheme, rest)) = trimmed.split_once("://") {
+            (format!("{scheme}://"), rest)
+        } else {
+            (String::new(), trimmed)
+        };
+        let without_qf = rest.split(['?', '#']).next().unwrap_or("");
+        let clean_rest = match without_qf.rsplit_once('@') {
+            Some((_, after)) => after,
+            None => without_qf,
+        };
+        let cleaned = format!("{prefix}{clean_rest}");
+        (cleaned != trimmed).then_some(cleaned)
     }
 
     pub fn display_name(&self) -> &str {
@@ -362,8 +402,22 @@ fn settings_file_error(path: &std::path::Path, error: std::io::Error) -> String 
     )
 }
 
+fn settings_dir(path: &Path) -> Result<&Path, String> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            settings_file_error(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "missing parent directory",
+                ),
+            )
+        })
+}
+
 fn write_settings(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
-    let parent = path.parent().unwrap();
+    let parent = settings_dir(path)?;
     let file_error = |err| settings_file_error(path, err);
     fs::create_dir_all(parent).map_err(file_error)?;
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(file_error)?;
@@ -779,5 +833,81 @@ mod tests {
             credentials::load(&file, &store).unwrap(),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn server_without_secrets_strips_malformed_and_non_http_urls_idempotently() {
+        for (input, expected) in [
+            ("https://stream.example.org:8443", None),
+            ("ftp://example.org:21/live", None),
+            (
+                "http://user:secret@example.org:99999/live?token=1#frag",
+                Some("http://example.org:99999/live"),
+            ),
+            (
+                "ftp://user:secret@example.org:21/live?token=1#frag",
+                Some("ftp://example.org/live"),
+            ),
+            (
+                "javascript:user:secret@example.org:8000?token=1",
+                Some("javascript:example.org:8000"),
+            ),
+            (
+                "http://example.org:https://user:secret@example.org:8443/p?token=1#f",
+                Some("http://example.org:8443/p"),
+            ),
+        ] {
+            let dest = Destination {
+                server: input.into(),
+                ..Destination::default()
+            };
+            assert_eq!(dest.server_without_secrets().as_deref(), expected, "{input}");
+            if let Some(cleaned) = expected {
+                let rerun = Destination {
+                    server: cleaned.into(),
+                    ..Destination::default()
+                };
+                assert_eq!(rerun.server_without_secrets(), None, "{cleaned}");
+            }
+        }
+    }
+
+    #[test]
+    fn save_repairs_duplicate_destination_ids_and_rejects_rootless_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sources.json");
+        let duplicate = Settings {
+            destinations: vec![
+                Destination {
+                    id: 1,
+                    name: "A".into(),
+                    password: "p1".into(),
+                    ..Destination::default()
+                },
+                Destination {
+                    id: 1,
+                    name: "B".into(),
+                    password: "p2".into(),
+                    ..Destination::default()
+                },
+            ],
+            ..Settings::default()
+        };
+        save_test_settings(&file, &duplicate).unwrap();
+        let loaded = load_test_settings(&file).unwrap();
+        assert_eq!(
+            loaded
+                .destinations
+                .iter()
+                .map(|d| (d.id, d.password.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "p1"), (2, "p2")]
+        );
+
+        for bad in [Path::new(""), Path::new("/"), Path::new("sources.json")] {
+            assert!(load_test_settings(bad).is_err(), "{bad:?}");
+            assert!(save_test_settings(bad, &Settings::default()).is_err(), "{bad:?}");
+            assert!(write_settings(bad, &serde_json::json!({})).is_err(), "{bad:?}");
+        }
     }
 }

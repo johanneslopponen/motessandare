@@ -246,11 +246,14 @@ impl Reader {
 
 impl AudioRing {
     fn new(channels: usize, minimum_frames: usize) -> Self {
-        let capacity = minimum_frames.next_power_of_two();
+        let capacity = minimum_frames
+            .max(1)
+            .checked_next_power_of_two()
+            .unwrap_or(1);
+        let total = capacity.checked_mul(channels).unwrap_or(0);
+        let capacity = if total == 0 { 0 } else { capacity };
         Self {
-            samples: (0..capacity * channels)
-                .map(|_| AtomicU32::new(0))
-                .collect(),
+            samples: (0..total).map(|_| AtomicU32::new(0)).collect(),
             channels,
             capacity,
             read_at: AtomicUsize::new(0),
@@ -264,6 +267,9 @@ impl AudioRing {
     where
         f32: FromSample<T>,
     {
+        if self.channels == 0 || self.capacity == 0 {
+            return;
+        }
         let written = self.written_at.load(Ordering::Relaxed);
         let read = self.read_at.load(Ordering::Acquire);
         let available = self.capacity - written.wrapping_sub(read);
@@ -286,6 +292,9 @@ impl AudioRing {
     }
 
     fn read(&self, frames: usize) -> Option<Vec<f32>> {
+        if self.channels == 0 || self.capacity == 0 {
+            return Some(Vec::new());
+        }
         let _reader = self.reader_lock.lock().ok()?;
         let read = self.read_at.load(Ordering::Relaxed);
         let written = self.written_at.load(Ordering::Acquire);
@@ -311,18 +320,24 @@ fn input_configs(
 ) -> Vec<SupportedStreamConfig> {
     let preferred_rate = default
         .as_ref()
-        .map_or(48_000, SupportedStreamConfig::sample_rate);
+        .map(SupportedStreamConfig::sample_rate)
+        .filter(|&rate| rate > 0)
+        .unwrap_or(48_000);
     let mut configs = Vec::new();
-    if let Some(config) =
-        default.filter(|config| config.channels() > 0 && pcm(config.sample_format()))
+    if let Some(config) = default
+        .filter(|config| config.channels() > 0 && config.sample_rate() > 0 && pcm(config.sample_format()))
     {
         configs.push(config);
     }
     configs.extend(ranges.into_iter().filter_map(|range| {
-        if range.channels() == 0 || !pcm(range.sample_format()) {
+        if range.channels() == 0
+            || !pcm(range.sample_format())
+            || range.min_sample_rate() > range.max_sample_rate()
+            || range.max_sample_rate() == 0
+        {
             return None;
         }
-        let rate = preferred_rate.clamp(range.min_sample_rate(), range.max_sample_rate());
+        let rate = preferred_rate.clamp(range.min_sample_rate().max(1), range.max_sample_rate());
         range.try_with_sample_rate(rate)
     }));
 
@@ -552,5 +567,27 @@ pub(crate) mod tests {
         assert_eq!(ring.read(8).unwrap(), [3., 30., 4., 40., 5., 50., 6., 60.]);
         ring.push(&[8f32, 80., 9.]);
         assert_eq!(ring.read(8).unwrap(), [8., 80.]);
+    }
+
+    #[test]
+    fn skips_inverted_or_zero_rate_ranges_and_handles_degenerate_rings() {
+        let buffer = SupportedBufferSize::Unknown;
+        let inverted = SupportedStreamConfigRange::new(2, 96_000, 44_100, buffer, SampleFormat::F32);
+        let zero_rate = SupportedStreamConfigRange::new(2, 0, 0, buffer, SampleFormat::F32);
+        let valid = SupportedStreamConfigRange::new(2, 44_100, 96_000, buffer, SampleFormat::F32);
+        let bad_default = SupportedStreamConfig::new(2, 0, buffer, SampleFormat::F32);
+        assert_eq!(
+            input_configs(Some(bad_default), [inverted, zero_rate, valid]),
+            [valid.with_sample_rate(48_000)]
+        );
+
+        for (channels, minimum_frames) in [(0, 8), (0, 0), (usize::MAX, 8)] {
+            let ring = AudioRing::new(channels, minimum_frames);
+            ring.push(&[0.5_f32, -0.5]);
+            assert_eq!(ring.read(4), Some(Vec::new()));
+        }
+        let ring = AudioRing::new(2, usize::MAX);
+        ring.push(&[0.5_f32, -0.5]);
+        assert_eq!(ring.read(4), Some(vec![0.5, -0.5]));
     }
 }

@@ -275,7 +275,7 @@ pub(super) fn restore_passwords(
 
 fn lock(path: &Path) -> Result<fs::File, String> {
     let file_error = |err| settings_file_error(path, err);
-    fs::create_dir_all(path.parent().unwrap()).map_err(file_error)?;
+    fs::create_dir_all(settings_dir(path)?).map_err(file_error)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -362,6 +362,7 @@ fn commit(
         settings: Settings,
     }
     let mut safe = settings.clone();
+    repair_ids(&mut safe.destinations, |destination| &mut destination.id);
     for dest in &mut safe.destinations {
         if let Some(server) = dest.server_without_secrets() {
             dest.server = server;
@@ -381,7 +382,7 @@ fn commit(
             .collect();
         let bytes = serde_json::to_vec(&BoundPasswords { credentials })
             .map_err(|_| "Lösenorden kunde inte sparas.")?;
-        Some(store.put(path.parent().unwrap(), &bytes)?)
+        Some(store.put(settings_dir(path)?, &bytes)?)
     } else {
         None
     };

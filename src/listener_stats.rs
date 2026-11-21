@@ -241,6 +241,16 @@ fn public_client() -> reqwest::Result<reqwest::blocking::Client> {
         .build()
 }
 
+fn clean_server_id(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 fn probe_server(server: &str) -> Result<String, String> {
     let client = public_client().map_err(|_| "Kunde inte starta HTTP-klienten".to_owned())?;
     let started = Instant::now();
@@ -258,13 +268,8 @@ fn probe_server(server: &str) -> Result<String, String> {
         let mut body = Vec::new();
         let _ = response.take(MAX_RESPONSE_BYTES).read_to_end(&mut body);
         if let Ok(parsed) = serde_json::from_slice::<ProbeResponse>(&body)
-            && let Some(server_id) = parsed.icestats.server_id.filter(|s| !s.trim().is_empty())
+            && let Some(name) = parsed.icestats.server_id.as_deref().and_then(clean_server_id)
         {
-            let name: String = server_id
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(100)
-                .collect();
             return Ok(format!("{name} nåddes ({latency_ms} ms)"));
         }
         return Ok(format!("Servern nåddes ({latency_ms} ms)"));
@@ -337,8 +342,8 @@ struct IceStats {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Sources {
-    Single(Stream),
-    Multiple(Vec<Stream>),
+    Single(serde_json::Map<String, serde_json::Value>),
+    Multiple(Vec<serde_json::Value>),
 }
 
 #[derive(Deserialize)]
@@ -353,6 +358,7 @@ struct Stream {
 enum Count {
     Number(u64),
     Text(String),
+    Other(serde::de::IgnoredAny),
 }
 
 impl Count {
@@ -360,6 +366,7 @@ impl Count {
         match self {
             Self::Number(count) => Some(count),
             Self::Text(text) => text.trim().parse().ok(),
+            Self::Other(_) => None,
         }
     }
 }
@@ -368,13 +375,14 @@ fn parse(body: &[u8]) -> ServerResult {
     let response: StatusResponse = serde_json::from_slice(body)
         .map_err(|_| "Serverns svar gick inte att läsa som lyssnarstatistik. Kontrollera att adressen går till rätt Icecast-server.")?;
     let streams = match response.icestats.source {
-        Some(Sources::Single(stream)) => vec![stream],
+        Some(Sources::Single(stream)) => vec![serde_json::Value::Object(stream)],
         Some(Sources::Multiple(streams)) => streams,
         None => Vec::new(),
     };
     Ok(streams
         .into_iter()
-        .filter_map(|stream| {
+        .filter_map(|item| {
+            let stream: Stream = serde_json::from_value(item).ok()?;
             // Icecast can advertise a different hostname from the one used to query it.
             let url = Url::parse(stream.listenurl.as_deref()?).ok()?;
             let counts = ListenerCounts {
@@ -613,5 +621,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(worker.join().unwrap().unwrap()["/live"].current, Some(3));
+    }
+
+    #[test]
+    fn clean_server_id_drops_control_only_strings_and_parse_tolerates_malformed_sibling_mounts() {
+        assert_eq!(clean_server_id("\x07\x1b "), None);
+        assert_eq!(
+            clean_server_id("  Icecast\x07 2.4  "),
+            Some("Icecast 2.4".into())
+        );
+
+        let mounts = parse(
+            br#"{"icestats":{"source":[
+                {"listenurl":"http://icecast.example/bad", "listeners":-1, "listener_peak":1.5},
+                {"listenurl":123, "listeners":"ignored"},
+                {"listenurl":"http://icecast.example/good", "listeners":11, "listener_peak":22}
+            ]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            mounts["/bad"],
+            ListenerCounts {
+                current: None,
+                peak: None
+            }
+        );
+        assert_eq!(
+            mounts["/good"],
+            ListenerCounts {
+                current: Some(11),
+                peak: Some(22)
+            }
+        );
     }
 }

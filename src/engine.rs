@@ -19,6 +19,7 @@ const FRAMES: usize = RATE * BLOCK_DURATION.as_millis() as usize / 1000;
 type Devices = Vec<(String, String, usize)>;
 
 struct Stream {
+    destination_id: u64,
     name: String,
     target: Option<StreamTarget>,
     output: Result<Output, String>,
@@ -59,6 +60,11 @@ struct ChannelMeter {
 
 impl ChannelMeter {
     fn update(&mut self, peak: f32) {
+        let peak = if peak.is_finite() {
+            peak.max(0.0)
+        } else {
+            0.0
+        };
         self.level.signal = peak.max(self.level.signal * 0.93);
         self.level.clipped |= peak >= 1.0;
         if peak >= self.level.held {
@@ -208,7 +214,10 @@ impl Engine {
         "Väntar på ljudingången. Kontrollera att rätt ljudenhet är ansluten och vald."
     }
     pub fn update(&self, sources: &[Source]) {
-        let mut mixer = self.mixer.lock().unwrap();
+        let mut mixer = self
+            .mixer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Mixer {
             sessions,
             stopping_streams,
@@ -275,8 +284,15 @@ impl Engine {
             .unwrap_or_default()
     }
     pub fn reset_clip(&self, id: u64, channel: usize) {
-        if let Some(session) = self.mixer.lock().unwrap().sessions.get_mut(&id) {
-            session.meters[channel].level.clipped = false;
+        if let Some(meter) = self
+            .mixer
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(&id)
+            .and_then(|session| session.meters.get_mut(channel))
+        {
+            meter.level.clipped = false;
         }
     }
     pub fn live_status(&self, id: u64) -> LiveStatus {
@@ -314,6 +330,7 @@ impl Engine {
                     stream.name.clone()
                 };
                 status.targets.push(TargetStatus {
+                    destination_id: stream.destination_id,
                     name,
                     detail,
                     audio_gap,
@@ -332,7 +349,10 @@ impl Engine {
     }
 
     pub fn completed_recordings(&self) -> Vec<(String, Result<std::path::PathBuf, String>)> {
-        let mut mixer = self.mixer.lock().unwrap();
+        let mut mixer = self
+            .mixer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut results = Vec::new();
         let Mixer {
             sources,
@@ -396,7 +416,10 @@ impl Engine {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
-        let mut mixer = self.mixer.lock().unwrap();
+        let mut mixer = self
+            .mixer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Mixer {
             sources,
             sessions,
@@ -440,6 +463,7 @@ pub struct LiveStatus {
 }
 
 pub struct TargetStatus {
+    pub destination_id: u64,
     pub name: String,
     pub detail: OutputStatus,
     pub sending: bool,
@@ -507,6 +531,7 @@ impl Mixer {
                 Err(error) => (None, Err(error.into())),
             };
             streams.push(Stream {
+                destination_id: dest.id,
                 name: dest.name.trim().to_owned(),
                 target,
                 output,
@@ -604,6 +629,9 @@ impl Converter {
     fn pull(&mut self, reader: &Reader) -> Option<Block> {
         let rate = reader.rate();
         let channels = reader.channels();
+        if rate == 0 || channels == 0 {
+            return None;
+        }
         if self
             .stream
             .as_ref()
@@ -643,11 +671,12 @@ impl Converter {
                 break;
             }
             let next = (i + 1).min(available - 1);
-            let frac = (self.phase - i as f64) as f32;
+            let frac = self.phase - i as f64;
             for (c, v) in frame.iter_mut().enumerate() {
-                let a = self.samples[i * channels + c];
-                let b = self.samples[next * channels + c];
-                *v = a + (b - a) * frac;
+                let a = f64::from(self.samples[i * channels + c]);
+                let b = f64::from(self.samples[next * channels + c]);
+                let sample = (a + (b - a) * frac) as f32;
+                *v = if sample.is_finite() { sample } else { 0.0 };
             }
             self.phase += step;
         }
@@ -1035,5 +1064,77 @@ pub(crate) mod tests {
         assert!(!present);
         assert_eq!(levels, (0., 0.));
         assert_eq!(pcm, vec![0.; FRAMES]);
+    }
+
+    #[test]
+    fn reset_clip_ignores_out_of_range_channels_without_poisoning_mixer() {
+        let mut engine = test_engine();
+        let source = Source::default();
+        engine.update(std::slice::from_ref(&source));
+        engine.mixer.lock().unwrap().render(&HashMap::new());
+        engine.reset_clip(source.id, 2);
+        engine.reset_clip(source.id, usize::MAX);
+        assert!(engine.shutdown().is_empty());
+    }
+
+    #[test]
+    fn channel_meter_ignores_nonfinite_peaks_and_decays_cleanly() {
+        let mut meter = ChannelMeter::default();
+        meter.update(f32::INFINITY);
+        meter.update(f32::NEG_INFINITY);
+        meter.update(f32::NAN);
+        assert_eq!(meter.level.signal, 0.0);
+        assert_eq!(meter.level.held, 0.0);
+        assert!(!meter.level.clipped);
+    }
+
+    #[test]
+    fn converter_ignores_zero_rate_and_interpolates_extreme_finite_samples() {
+        let zero_rate = synthetic_reader(1, 0);
+        feed(&zero_rate, &[0.5; 4]);
+        assert!(Converter::default().pull(&zero_rate).is_none());
+
+        for rate in [RATE as u32, 44_100] {
+            let reader = synthetic_reader(1, rate);
+            let pattern: Vec<f32> = (0..3000)
+                .map(|i| if i % 2 == 0 { -f32::MAX } else { f32::MAX })
+                .collect();
+            feed(&reader, &pattern);
+            let block = Converter::default().pull(&reader).unwrap();
+            assert!(block.samples.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    #[test]
+    fn live_status_tracks_destination_ids_for_unnamed_and_duplicate_destinations() {
+        let engine = test_engine();
+        let source = Source {
+            id: 1,
+            destination_ids: vec![10, 20],
+            ..Source::default()
+        };
+        let d1 = Destination {
+            id: 10,
+            name: String::new(),
+            server: "invalid".into(),
+            ..Destination::default()
+        };
+        let d2 = Destination {
+            id: 20,
+            name: String::new(),
+            server: "invalid".into(),
+            ..Destination::default()
+        };
+        engine.update(std::slice::from_ref(&source));
+        engine.set_stream(&source, &[d1, d2], true);
+        let status = engine.live_status(1);
+        assert_eq!(
+            status
+                .targets
+                .iter()
+                .map(|t| (t.destination_id, t.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(10, "Sändare 1"), (20, "Sändare 2")]
+        );
     }
 }
