@@ -25,8 +25,10 @@ fn decode_audio(path: &Path) -> Vec<f32> {
     );
     decoded
         .stdout
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&bytes| f32::from_le_bytes(bytes))
         .collect()
 }
 
@@ -236,7 +238,9 @@ fn slow_icecast_handshake_preserves_startup_audio() {
     let path = folder.path().join("received.mp3");
     fs::write(&path, mp3).unwrap();
     let last_loud_frame = decode_audio(&path)
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .rposition(|frame| frame[0].abs() > 0.1)
         .expect("the tone played during the handshake should be audible");
     // Allow 50 ms for MP3 encoder delay.

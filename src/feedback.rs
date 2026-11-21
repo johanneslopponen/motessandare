@@ -19,7 +19,7 @@ pub fn message(ui: &mut Ui, text: &str) -> bool {
     let accent = ui.visuals().warn_fg_color;
     egui::Frame::new()
         .fill(accent.gamma_multiply(0.08))
-        .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
+        .stroke(egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.5)))
         .corner_radius(5)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {

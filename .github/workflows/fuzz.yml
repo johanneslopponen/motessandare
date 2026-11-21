@@ -59,7 +59,7 @@ jobs:
         with:
           workspaces: |
             . -> target
-            fuzz -> fuzz/target
+            fuzz -> target
           prefix-key: v1-fuzz
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -99,7 +99,8 @@ jobs:
               DURATION=30
               ;;
           esac
-          cargo +nightly fuzz run "$TARGET" -- -max_total_time="$DURATION" -rss_limit_mb=2048
+          HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz run --target "$HOST_TARGET" "$TARGET" -- -max_total_time="$DURATION" -rss_limit_mb=2048
 
       - name: Upload crash artifacts
         if: failure()

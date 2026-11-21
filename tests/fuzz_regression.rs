@@ -68,6 +68,9 @@ fn settings_load_regression_corpus_and_edges() {
     fuzz_settings_load(duplicate_ids, b"", "http://localhost:8000");
     fuzz_settings_load(duplicate_ids, b"", "ftp://user:secret@example.org/path");
     fuzz_settings_load(duplicate_ids, b"", "");
+    fuzz_settings_load(b"z{", b"op\0", "\0@\u{11}\0\0mamct:edp\"\"ark\",\"dest\0in");
+    fuzz_settings_load(b"", b"", "\u{11}\0\0mamct:edp\"\"ark\",\"dest\0in");
+    fuzz_settings_load(b"", b"", "FOO:user@bar?token=1#frag");
 }
 
 #[test]

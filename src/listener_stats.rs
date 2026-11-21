@@ -134,6 +134,18 @@ impl ListenerStats {
         self.servers.values().any(|stats| stats.pending.is_some())
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_loading_for_test(&mut self, server: &str) {
+        self.servers.insert(
+            server.to_owned(),
+            ServerStats {
+                pending: None,
+                result: None,
+                next_refresh: Some(Instant::now() + REFRESH_INTERVAL),
+            },
+        );
+    }
+
     pub fn history(&self, target: &StatsTarget) -> Option<&VecDeque<u64>> {
         self.history
             .get(&(target.server.clone(), target.mount.clone()))

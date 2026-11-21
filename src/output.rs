@@ -16,6 +16,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(not(miri))]
 use curl::easy::{Easy, HttpVersion, List, ReadError};
 use url::Url;
 
@@ -399,6 +400,17 @@ pub(crate) struct StreamUpload {
 }
 
 impl StreamUpload {
+    #[cfg(miri)]
+    fn send(
+        &self,
+        _audio: impl Read,
+        _state: &State,
+        _progress: &EncodeProgress,
+    ) -> Result<(), String> {
+        Err("libcurl is unavailable under Miri".into())
+    }
+
+    #[cfg(not(miri))]
     fn send(
         &self,
         mut audio: impl Read,

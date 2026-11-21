@@ -663,7 +663,7 @@ impl Ui {
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
-                    .stroke(Stroke::new(1.0, palette.card_divider))
+                    .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(14, 12)),
             )
             .show(ctx, |ui| {
@@ -914,7 +914,7 @@ impl Ui {
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
-                    .stroke(Stroke::new(1.0, palette.card_divider))
+                    .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(12, 12)),
             )
             .show(ctx, |ui| {
@@ -960,7 +960,7 @@ impl Ui {
 
                             let frame_resp = Frame::new()
                                 .fill(bg)
-                                .stroke(Stroke::new(1.0, border))
+                                .stroke(Stroke::new(1.0_f32, border))
                                 .corner_radius(CornerRadius::same(8))
                                 .inner_margin(Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
@@ -1096,7 +1096,7 @@ impl Ui {
             .frame(
                 Frame::new()
                     .fill(palette.header_bg)
-                    .stroke(Stroke::new(1.0, palette.card_divider))
+                    .stroke(Stroke::new(1.0_f32, palette.card_divider))
                     .inner_margin(Margin::symmetric(14, 12)),
             )
             .show(ctx, |ui| {
@@ -1300,7 +1300,7 @@ impl Ui {
             .show(ctx, |ui| {
                 Frame::new()
                     .fill(palette.card_bg)
-                    .stroke(Stroke::new(1.0, palette.stream_active_border))
+                    .stroke(Stroke::new(1.0_f32, palette.stream_active_border))
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(Margin::symmetric(14, 8))
                     .shadow(palette.card_shadow)
@@ -1490,7 +1490,7 @@ impl Ui {
             .frame(
                 Frame::new()
                     .fill(palette.card_bg)
-                    .stroke(Stroke::new(1.0, palette.card_border))
+                    .stroke(Stroke::new(1.0_f32, palette.card_border))
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(Margin::symmetric(18, 16))
                     .shadow(palette.card_shadow),
@@ -2031,7 +2031,7 @@ impl eframe::App for Ui {
                         if mode == LayoutMode::Narrow { 10 } else { 16 },
                         10,
                     ))
-                    .stroke(Stroke::new(1.0, palette.card_border)),
+                    .stroke(Stroke::new(1.0_f32, palette.card_border)),
             )
             .show(ctx, |ui| {
                 self.header(ui, mode, palette);
@@ -2120,7 +2120,7 @@ impl eframe::App for Ui {
                         // Segmented view tabs
                         Frame::new()
                             .fill(palette.segmented_bg)
-                            .stroke(Stroke::new(1.0, palette.pill_border))
+                            .stroke(Stroke::new(1.0_f32, palette.pill_border))
                             .corner_radius(CornerRadius::same(8))
                             .inner_margin(Margin::same(2))
                             .show(ui, |ui| {
@@ -2994,42 +2994,42 @@ fn build_visuals(dark: bool) -> egui::Visuals {
     visuals.override_text_color = None;
 
     visuals.selection.bg_fill = palette.tab_active_bg;
-    visuals.selection.stroke = Stroke::new(1.0, palette.tab_active_fg);
+    visuals.selection.stroke = Stroke::new(1.0_f32, palette.tab_active_fg);
     visuals.hyperlink_color = palette.stream_accent;
     visuals.warn_fg_color = palette.warning;
     visuals.error_fg_color = palette.danger;
 
     visuals.widgets.noninteractive.bg_fill = palette.card_bg;
     visuals.widgets.noninteractive.weak_bg_fill = palette.pill_bg;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.card_border);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.text_primary);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, palette.card_border);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.inactive.bg_fill = palette.btn_bg;
     visuals.widgets.inactive.weak_bg_fill = palette.btn_bg;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.btn_border);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text_primary);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, palette.btn_border);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.hovered.bg_fill = palette.btn_bg_hover;
     visuals.widgets.hovered.weak_bg_fill = palette.btn_bg_hover;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.btn_border_hover);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, palette.text_primary);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, palette.btn_border_hover);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.active.bg_fill = palette.btn_bg_active;
     visuals.widgets.active.weak_bg_fill = palette.btn_bg_active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.stream_accent);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.text_primary);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, palette.stream_accent);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.active.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.open.bg_fill = palette.btn_bg_hover;
     visuals.widgets.open.weak_bg_fill = palette.btn_bg_hover;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.stream_accent);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, palette.text_primary);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, palette.stream_accent);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.open.corner_radius = CornerRadius::same(7);
 
-    visuals.window_stroke = Stroke::new(1.0, palette.card_border);
+    visuals.window_stroke = Stroke::new(1.0_f32, palette.card_border);
     visuals.window_corner_radius = CornerRadius::same(10);
 
     visuals
@@ -3038,7 +3038,7 @@ fn build_visuals(dark: bool) -> egui::Visuals {
 fn card_frame(palette: Palette, border: Color32) -> Frame {
     Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(14, 12))
         .shadow(palette.card_shadow)
@@ -3057,7 +3057,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
 
     match icon {
         Icon::Help => {
-            painter.circle_stroke(c, r * 0.93, Stroke::new(1.3, color));
+            painter.circle_stroke(c, r * 0.93, Stroke::new(1.3_f32, color));
             painter.text(
                 c,
                 egui::Align2::CENTER_CENTER,
@@ -3071,65 +3071,93 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 let bottom = c + Vec2::new(x * r, r * 0.8);
                 painter.line_segment(
                     [bottom, bottom - Vec2::new(0.0, r * height)],
-                    Stroke::new(2.0, color),
+                    Stroke::new(2.0_f32, color),
                 );
             }
         }
         Icon::Broadcast => {
             painter.circle_filled(c, (r * 0.22).max(1.8), color);
-            paint_arc(painter, c, r * 0.54, -0.68, 0.68, Stroke::new(1.6, color));
+            paint_arc(
+                painter,
+                c,
+                r * 0.54,
+                -0.68,
+                0.68,
+                Stroke::new(1.6_f32, color),
+            );
             paint_arc(
                 painter,
                 c,
                 r * 0.54,
                 PI - 0.68,
                 PI + 0.68,
-                Stroke::new(1.6, color),
+                Stroke::new(1.6_f32, color),
             );
-            paint_arc(painter, c, r * 0.88, -0.78, 0.78, Stroke::new(1.6, color));
+            paint_arc(
+                painter,
+                c,
+                r * 0.88,
+                -0.78,
+                0.78,
+                Stroke::new(1.6_f32, color),
+            );
             paint_arc(
                 painter,
                 c,
                 r * 0.88,
                 PI - 0.78,
                 PI + 0.78,
-                Stroke::new(1.6, color),
+                Stroke::new(1.6_f32, color),
             );
         }
         Icon::BroadcastStop => {
             let faded = color.gamma_multiply(0.65);
             painter.circle_filled(c, (r * 0.20).max(1.6), faded);
-            paint_arc(painter, c, r * 0.54, -0.65, 0.65, Stroke::new(1.5, faded));
+            paint_arc(
+                painter,
+                c,
+                r * 0.54,
+                -0.65,
+                0.65,
+                Stroke::new(1.5_f32, faded),
+            );
             paint_arc(
                 painter,
                 c,
                 r * 0.54,
                 PI - 0.65,
                 PI + 0.65,
-                Stroke::new(1.5, faded),
+                Stroke::new(1.5_f32, faded),
             );
-            paint_arc(painter, c, r * 0.86, -0.75, 0.75, Stroke::new(1.5, faded));
+            paint_arc(
+                painter,
+                c,
+                r * 0.86,
+                -0.75,
+                0.75,
+                Stroke::new(1.5_f32, faded),
+            );
             paint_arc(
                 painter,
                 c,
                 r * 0.86,
                 PI - 0.75,
                 PI + 0.75,
-                Stroke::new(1.5, faded),
+                Stroke::new(1.5_f32, faded),
             );
             // Crisp diagonal stop slash
             let d = r * 0.78;
             painter.line_segment(
                 [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
-                Stroke::new(2.0, color),
+                Stroke::new(2.0_f32, color),
             );
         }
         Icon::Record => {
-            painter.circle_stroke(c, r * 0.82, Stroke::new(1.6, color));
+            painter.circle_stroke(c, r * 0.82, Stroke::new(1.6_f32, color));
             painter.circle_filled(c, r * 0.44, color);
         }
         Icon::RecordStop => {
-            painter.circle_stroke(c, r * 0.82, Stroke::new(1.6, color));
+            painter.circle_stroke(c, r * 0.82, Stroke::new(1.6_f32, color));
             let sq = Rect::from_center_size(c, Vec2::splat(r * 0.74));
             painter.rect_filled(sq, CornerRadius::same(1), color);
         }
@@ -3150,11 +3178,11 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 .into_iter()
                 .map(|(x, y)| c + Vec2::new(x * r, y * r))
                 .collect();
-            painter.add(Shape::closed_line(points, Stroke::new(1.5, color)));
+            painter.add(Shape::closed_line(points, Stroke::new(1.5_f32, color)));
         }
         Icon::Settings => {
             // 3 horizontal slider tracks with staggered knobs
-            let stroke = Stroke::new(1.4, color);
+            let stroke = Stroke::new(1.4_f32, color);
             let rows = [(-0.56, -0.25), (0.0, 0.30), (0.56, -0.10)];
             for (y_off, knob_x) in rows {
                 let y = c.y + r * y_off;
@@ -3167,13 +3195,13 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Plus => {
             let d = r * 0.72;
-            let stroke = Stroke::new(1.8, color);
+            let stroke = Stroke::new(1.8_f32, color);
             painter.line_segment([Pos2::new(c.x - d, c.y), Pos2::new(c.x + d, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x, c.y - d), Pos2::new(c.x, c.y + d)], stroke);
         }
 
         Icon::Check => {
-            let stroke = Stroke::new(1.8, color);
+            let stroke = Stroke::new(1.8_f32, color);
             let points = vec![
                 Pos2::new(c.x - r * 0.65, c.y + r * 0.05),
                 Pos2::new(c.x - r * 0.15, c.y + r * 0.55),
@@ -3183,7 +3211,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Theme => {
             // Contrast half-moon/sun circle
-            painter.circle_stroke(c, r * 0.82, Stroke::new(1.5, color));
+            painter.circle_stroke(c, r * 0.82, Stroke::new(1.5_f32, color));
             let steps = 12;
             let mut half: Vec<Pos2> = (0..=steps)
                 .map(|i| {
@@ -3204,7 +3232,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Back => {
-            let stroke = Stroke::new(1.7, color);
+            let stroke = Stroke::new(1.7_f32, color);
             painter.line_segment(
                 [
                     Pos2::new(c.x - r * 0.65, c.y),
@@ -3223,7 +3251,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Close => {
             let d = r * 0.58;
-            let stroke = Stroke::new(1.7, color);
+            let stroke = Stroke::new(1.7_f32, color);
             painter.line_segment(
                 [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
                 stroke,
@@ -3241,7 +3269,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(
                 body,
                 CornerRadius::same(2),
-                Stroke::new(1.5, color),
+                Stroke::new(1.5_f32, color),
                 egui::StrokeKind::Inside,
             );
             paint_arc(
@@ -3250,11 +3278,11 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 r * 0.40,
                 PI,
                 PI * 2.0,
-                Stroke::new(1.5, color),
+                Stroke::new(1.5_f32, color),
             );
         }
         Icon::Refresh => {
-            let stroke = Stroke::new(1.6, color);
+            let stroke = Stroke::new(1.6_f32, color);
             paint_arc(painter, c, r * 0.68, -0.3, PI * 1.45, stroke);
             let tip = Pos2::new(
                 c.x + r * 0.68 * (-0.3_f32).cos(),
@@ -3270,7 +3298,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::ChevronRight => {
-            let stroke = Stroke::new(1.7, color);
+            let stroke = Stroke::new(1.7_f32, color);
             painter.add(Shape::line(
                 vec![
                     Pos2::new(c.x - r * 0.28, c.y - r * 0.52),
@@ -3281,7 +3309,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::ChevronDown => {
-            let stroke = Stroke::new(1.7, color);
+            let stroke = Stroke::new(1.7_f32, color);
             painter.add(Shape::line(
                 vec![
                     Pos2::new(c.x - r * 0.52, c.y - r * 0.26),
@@ -3292,7 +3320,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::Eye => {
-            let stroke = Stroke::new(1.5, color);
+            let stroke = Stroke::new(1.5_f32, color);
             paint_arc(
                 painter,
                 Pos2::new(c.x, c.y + r * 0.55),
@@ -3312,7 +3340,7 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.circle_filled(c, (r * 0.24).max(1.6), color);
         }
         Icon::EyeOff => {
-            let stroke = Stroke::new(1.4, color);
+            let stroke = Stroke::new(1.4_f32, color);
             paint_arc(
                 painter,
                 Pos2::new(c.x, c.y + r * 0.55),
@@ -3332,11 +3360,11 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let d = r * 0.70;
             painter.line_segment(
                 [Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)],
-                Stroke::new(1.7, color),
+                Stroke::new(1.7_f32, color),
             );
         }
         Icon::Undo => {
-            let stroke = Stroke::new(1.6, color);
+            let stroke = Stroke::new(1.6_f32, color);
             paint_arc(
                 painter,
                 Pos2::new(c.x + r * 0.12, c.y + r * 0.14),
@@ -3428,7 +3456,7 @@ fn format_dbfs(signal: f32) -> String {
 fn lock_badge(ui: &mut EguiUi, text: &str, palette: Palette) {
     Frame::new()
         .fill(palette.warn_pill_bg)
-        .stroke(Stroke::new(1.0, palette.warn_pill_border))
+        .stroke(Stroke::new(1.0_f32, palette.warn_pill_border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(8, 3))
         .show(ui, |ui| {
@@ -3455,7 +3483,7 @@ fn dot_pill(
 ) {
     Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
@@ -3479,7 +3507,7 @@ fn wrapping_dot_pill(
 ) {
     Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(8, 3))
         .show(ui, |ui| {
@@ -3505,7 +3533,7 @@ fn dismissible_dot_pill(
     feedback::show_if_needed(ui, id, text, |ui, message| {
         Frame::new()
             .fill(bg)
-            .stroke(Stroke::new(1.0, border))
+            .stroke(Stroke::new(1.0_f32, border))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::symmetric(8, 3))
             .show(ui, |ui| {
@@ -3688,7 +3716,7 @@ fn segmented_choice(
     ui.push_id(id_salt, |ui| {
         Frame::new()
             .fill(palette.segmented_bg)
-            .stroke(Stroke::new(1.0, palette.pill_border))
+            .stroke(Stroke::new(1.0_f32, palette.pill_border))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(2))
             .show(ui, |ui| {
@@ -3718,7 +3746,7 @@ fn segmented_u32(
     ui.push_id(id_salt, |ui| {
         Frame::new()
             .fill(palette.segmented_bg)
-            .stroke(Stroke::new(1.0, palette.pill_border))
+            .stroke(Stroke::new(1.0_f32, palette.pill_border))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(2))
             .show(ui, |ui| {
@@ -3750,7 +3778,7 @@ fn segmented_bool(
     ui.push_id(id_salt, |ui| {
         Frame::new()
             .fill(palette.segmented_bg)
-            .stroke(Stroke::new(1.0, palette.pill_border))
+            .stroke(Stroke::new(1.0_f32, palette.pill_border))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(2))
             .show(ui, |ui| {
@@ -3818,8 +3846,10 @@ fn paint_sparkline(ui: &mut EguiUi, samples: &VecDeque<u64>, palette: Palette) {
             Pos2::new(x, y)
         })
         .collect();
-    ui.painter()
-        .add(Shape::line(points, Stroke::new(1.8, palette.stream_accent)));
+    ui.painter().add(Shape::line(
+        points,
+        Stroke::new(1.8_f32, palette.stream_accent),
+    ));
 }
 
 fn vertical_stereo_meter(ui: &mut EguiUi, levels: &[MeterLevel], palette: Palette) {
@@ -3875,13 +3905,13 @@ fn vertical_stereo_meter(ui: &mut EguiUi, levels: &[MeterLevel], palette: Palett
                 let y = inner.bottom() - meter_fraction(level.held) * inner.height();
                 painter.line_segment(
                     [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
-                    Stroke::new(2.0, palette.text_primary),
+                    Stroke::new(2.0_f32, palette.text_primary),
                 );
             }
             painter.rect_stroke(
                 bar_rect,
                 CornerRadius::same(4),
-                Stroke::new(1.0, palette.meter_border),
+                Stroke::new(1.0_f32, palette.meter_border),
                 egui::StrokeKind::Inside,
             );
         };
@@ -4003,7 +4033,7 @@ fn paint_focus_ring(painter: &egui::Painter, rect: Rect, corner_radius: u8, pale
     painter.rect_stroke(
         rect.expand(1.0),
         CornerRadius::same(corner_radius.saturating_add(1)),
-        Stroke::new(2.0, palette.stream_accent),
+        Stroke::new(2.0_f32, palette.stream_accent),
         egui::StrokeKind::Outside,
     );
 }
@@ -4060,7 +4090,7 @@ fn header_pill<R>(
     painter.rect_stroke(
         rect,
         CornerRadius::same(8),
-        Stroke::new(1.0, palette.pill_border),
+        Stroke::new(1.0_f32, palette.pill_border),
         egui::StrokeKind::Inside,
     );
     let inner_rect = rect.shrink2(Vec2::new(4.0, 3.0));
@@ -4123,7 +4153,7 @@ fn icon_button(
     painter.rect_stroke(
         rect,
         CornerRadius::same(6),
-        Stroke::new(1.0, border),
+        Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     if response.has_focus() {
@@ -4268,7 +4298,7 @@ fn render_button_sized(
     painter.rect_stroke(
         rect,
         CornerRadius::same(7),
-        Stroke::new(1.0, border),
+        Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     if response.has_focus() {
@@ -4456,7 +4486,7 @@ fn tab_button(ui: &mut EguiUi, label: &str, selected: bool, palette: Palette) ->
         painter.rect_stroke(
             rect,
             CornerRadius::same(7),
-            Stroke::new(1.0, border),
+            Stroke::new(1.0_f32, border),
             egui::StrokeKind::Inside,
         );
     }
@@ -4482,7 +4512,7 @@ fn status_pill(
 ) -> egui::Response {
     Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
@@ -5346,7 +5376,7 @@ fn paint_meter_scale(painter: &egui::Painter, bar_rect: Rect, scale_top: f32, pa
                 Pos2::new(tick_x, bar_rect.bottom()),
                 Pos2::new(tick_x, bar_rect.bottom() + 2.5),
             ],
-            Stroke::new(1.0, palette.meter_border),
+            Stroke::new(1.0_f32, palette.meter_border),
         );
         painter.galley(
             Pos2::new(item.label_x, scale_top),
@@ -5399,14 +5429,14 @@ fn paint_meter_bar(
             };
             painter.line_segment(
                 [Pos2::new(x, top_y), Pos2::new(x, fill_rect.bottom() - 0.5)],
-                Stroke::new(1.0, tick_color),
+                Stroke::new(1.0_f32, tick_color),
             );
         }
     }
     painter.rect_stroke(
         bar_rect,
         rounding,
-        Stroke::new(1.0, palette.meter_border),
+        Stroke::new(1.0_f32, palette.meter_border),
         egui::StrokeKind::Inside,
     );
 
@@ -5417,7 +5447,7 @@ fn paint_meter_bar(
                 Pos2::new(x, fill_rect.top()),
                 Pos2::new(x, fill_rect.bottom()),
             ],
-            Stroke::new(2.0, palette.text_primary),
+            Stroke::new(2.0_f32, palette.text_primary),
         );
     }
 }
@@ -5786,7 +5816,7 @@ fn source_settings(
             ui.push_id(("dest-slot", slot_index, dest_id), |ui| {
                 let frame_resp = Frame::new()
                     .fill(palette.pill_bg)
-                    .stroke(Stroke::new(1.0, slot_border))
+                    .stroke(Stroke::new(1.0_f32, slot_border))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(10, 8))
                     .show(ui, |ui| {
@@ -5990,7 +6020,7 @@ fn source_settings(
                 ui.add_space(6.0);
                 Frame::new()
                     .fill(palette.pill_bg)
-                    .stroke(Stroke::new(1.0, palette.stream_active_border))
+                    .stroke(Stroke::new(1.0_f32, palette.stream_active_border))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -6668,7 +6698,7 @@ fn mark_invalid(ui: &EguiUi, field: &egui::Response, palette: Palette) {
     ui.painter().rect_stroke(
         field.rect,
         CornerRadius::same(5),
-        Stroke::new(1.5, palette.danger),
+        Stroke::new(1.5_f32, palette.danger),
         egui::StrokeKind::Inside,
     );
 }
@@ -7908,6 +7938,7 @@ mod tests {
             })
             .collect();
         let mut stats = ListenerStats::default();
+        stats.seed_loading_for_test("http://example.invalid:8000");
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360.0, 760.0))),
             ..Default::default()

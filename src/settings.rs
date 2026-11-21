@@ -66,14 +66,16 @@ impl Destination {
                 let cleaned = url.to_string();
                 return (cleaned != trimmed).then_some(cleaned);
             }
-            let prefix = format!("{}:", url.scheme());
-            let rest = &trimmed[prefix.len()..];
-            let without_qf = rest.split(['?', '#']).next().unwrap_or("");
-            let clean_rest = match without_qf.rsplit_once('@') {
+            let had_secrets =
+                url.query().is_some() || url.fragment().is_some() || url.path().contains('@');
+            if !had_secrets {
+                return None;
+            }
+            let clean_path = match url.path().rsplit_once('@') {
                 Some((_, after)) => after,
-                None => without_qf,
+                None => url.path(),
             };
-            let cleaned = format!("{prefix}{clean_rest}");
+            let cleaned = format!("{}:{clean_path}", url.scheme());
             return (cleaned != trimmed).then_some(cleaned);
         }
         let (prefix, rest) = if let Some((scheme, rest)) = trimmed.split_once("://") {
@@ -853,6 +855,11 @@ mod tests {
                 "http://example.org:https://user:secret@example.org:8443/p?token=1#f",
                 Some("http://example.org:8443/p"),
             ),
+            (
+                "\0@\u{11}\0\0mamct:edp\"\"ark\",\"dest\0in",
+                Some("\u{11}\0\0mamct:edp\"\"ark\",\"dest\0in"),
+            ),
+            ("\u{11}\0\0mamct:edp\"\"ark\",\"dest\0in", None),
         ] {
             let dest = Destination {
                 server: input.into(),

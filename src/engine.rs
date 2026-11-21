@@ -782,7 +782,7 @@ pub(crate) mod tests {
             let block = converter.pull(&reader).unwrap();
             assert_eq!(block.channels, 2);
             assert_eq!(block.samples.len(), FRAMES * 2);
-            for (index, frame) in block.samples.chunks_exact(2).enumerate() {
+            for (index, frame) in block.samples.as_chunks::<2>().0.iter().enumerate() {
                 let output_index = block_index * FRAMES + index;
                 let expected = output_index as f32 * input_rate as f32 / RATE as f32 / 4096.;
                 assert!((frame[0] - expected).abs() < 1e-6, "frame {output_index}");
@@ -1042,7 +1042,12 @@ pub(crate) mod tests {
             let (pcm, _, present) = route(&source, block);
             assert_eq!(pcm.len(), 2 * FRAMES);
             assert_eq!(present, block.is_some());
-            assert!(pcm.chunks_exact(2).all(|frame| frame == expected));
+            assert!(
+                pcm.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|&frame| frame == expected)
+            );
         }
     }
 
