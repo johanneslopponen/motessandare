@@ -478,3 +478,68 @@ fn finalizes_queued_stereo_audio_and_reports_its_full_duration() {
         "FFmpeg reported {reported:?} for 240 ms of audio"
     );
 }
+
+#[test]
+fn rejects_dot_segment_mounts_invalid_servers_control_users_and_bad_rates() {
+    for mount in ["", "/", "/..", "/.", "/a/../", "/live?q=1", "/live#f"] {
+        let dest = Destination {
+            mount: mount.into(),
+            ..Destination::default()
+        };
+        assert!(StreamTarget::parse(&dest).is_err(), "{mount}");
+    }
+    for server in [
+        "http://localhost:",
+        "http://loc\nalhost:8000",
+        "http:/127.0.0.1",
+        "http://[::1]:?token=1",
+    ] {
+        let dest = Destination {
+            server: server.into(),
+            ..Destination::default()
+        };
+        assert!(StreamTarget::parse(&dest).is_err(), "{server}");
+    }
+    for user in ["bad\0user", "bad\x07user", "bad\x1buser"] {
+        assert!(username_hint(user).is_some(), "{user:?}");
+    }
+    let valid = Destination::default();
+    let (target, tls) = StreamTarget::parse(&valid).unwrap();
+    assert!(stream_command(&valid, 0, &target, tls).is_err());
+    for bitrate in [0, 15, 511, u32::MAX] {
+        let bad = Destination {
+            bitrate,
+            ..Destination::default()
+        };
+        assert!(
+            stream_command(&bad, 1, &target, tls).is_err(),
+            "opus {bitrate}"
+        );
+    }
+    for bitrate in [0, 31, 321] {
+        let bad = Destination {
+            codec: "MP3".into(),
+            bitrate,
+            ..Destination::default()
+        };
+        assert!(
+            stream_command(&bad, 1, &target, tls).is_err(),
+            "mp3 {bitrate}"
+        );
+    }
+}
+
+#[test]
+fn sanitizes_windows_reserved_stems_and_keeps_utc_dates_monotonic() {
+    let dt = utc_from_unix(1_793_869_447);
+    for raw in ["CON", "NUL", "PRN", "AUX", "COM1", "LPT9", "con.extra"] {
+        assert_eq!(format_recording_stem(raw, "Sal", dt), "inspelning", "{raw}");
+    }
+    let a = utc_from_unix(u64::MAX - 86_400);
+    let b = utc_from_unix(u64::MAX);
+    assert!(
+        (a.year, a.month, a.day, a.hour, a.minute, a.second)
+            < (b.year, b.month, b.day, b.hour, b.minute, b.second)
+    );
+    assert!(a.year > 0 && b.year > 0);
+}

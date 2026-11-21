@@ -261,13 +261,34 @@ impl StreamTarget {
     }
 
     pub fn parse(dest: &Destination) -> Result<(Self, bool), &'static str> {
-        let mut server = Url::parse(dest.server.trim())
-            .map_err(|_| "Kontrollera serveradressen under Destinationer. Ange en adress som börjar med http:// eller https://.")?;
-        let tls = match server.scheme() {
-            "http" => false,
-            "https" => true,
-            _ => return Err("Serveradressen måste börja med http:// eller https://."),
+        let raw = dest.server.trim();
+        if raw.chars().any(char::is_control) {
+            return Err("Ta bort ogiltiga kontrolltecken från serveradressen.");
+        }
+        let Some((scheme, rest)) = raw.split_once("://") else {
+            return Err(
+                "Kontrollera serveradressen under Destinationer. Ange en adress som börjar med http:// eller https://.",
+            );
         };
+        let tls = if scheme.eq_ignore_ascii_case("http") {
+            false
+        } else if scheme.eq_ignore_ascii_case("https") {
+            true
+        } else {
+            return Err("Serveradressen måste börja med http:// eller https://.");
+        };
+        if rest.is_empty() || rest.starts_with(['/', '\\', '?', '#']) {
+            return Err("Lägg till serverns värdnamn i serveradressen under Destinationer.");
+        }
+        if rest
+            .split(['/', '\\', '?', '#'])
+            .next()
+            .is_some_and(|authority| authority.ends_with(':'))
+        {
+            return Err("Ange en serverport mellan 1 och 65535 under Destinationer.");
+        }
+        let server = Url::parse(raw)
+            .map_err(|_| "Kontrollera serveradressen under Destinationer. Ange en adress som börjar med http:// eller https://.")?;
         let port = server
             .port_or_known_default()
             .filter(|port| *port > 0)
@@ -276,22 +297,43 @@ impl StreamTarget {
             .host()
             .ok_or("Lägg till serverns värdnamn i serveradressen under Destinationer.")?
             .to_string();
-        let mount = dest.mount.trim().trim_start_matches('/');
-        if mount.is_empty() || mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
-            return Err(
-                "Kontrollera monteringspunkten under Destinationer. Ange till exempel /live.",
-            );
-        }
-        server.set_path(&format!("/{mount}"));
-        let mount = server.path().to_owned();
+        let mount = normalize_mount(&dest.mount)
+            .ok_or("Kontrollera monteringspunkten under Destinationer. Ange till exempel /live.")?;
         Ok((Self { host, port, mount }, tls))
+    }
+}
+
+pub(crate) fn normalize_mount(value: &str) -> Option<String> {
+    let mount = value.trim().trim_start_matches('/');
+    if mount.is_empty() || mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
+        return None;
+    }
+    let mut url = Url::parse("http://localhost").ok()?;
+    url.set_path(&format!("/{mount}"));
+    let normalized = url.path().to_owned();
+    if normalized.trim_start_matches('/').is_empty() {
+        return None;
+    }
+    Some(normalized)
+}
+
+pub fn bitrate_range(format: &str) -> Option<std::ops::RangeInclusive<u32>> {
+    if format.eq_ignore_ascii_case("mp3") {
+        Some(32..=320)
+    } else if format.eq_ignore_ascii_case("opus") {
+        Some(16..=510)
+    } else {
+        None
     }
 }
 
 pub fn username_hint(value: &str) -> Option<&'static str> {
     let user = value.trim();
-    (user.contains([':', '/', '?', '#', '@', '%']) || user.chars().any(char::is_whitespace))
-        .then_some("Ta bort blanksteg och tecknen : / ? # @ % från Icecast-användarnamnet.")
+    (user.contains([':', '/', '?', '#', '@', '%'])
+        || user.chars().any(|c| c.is_whitespace() || c.is_control()))
+    .then_some(
+        "Ta bort blanksteg, kontrolltecken och tecknen : / ? # @ % från Icecast-användarnamnet.",
+    )
 }
 
 pub(crate) fn stream_command(
@@ -300,6 +342,9 @@ pub(crate) fn stream_command(
     target: &StreamTarget,
     tls: bool,
 ) -> Result<(Command, StreamUpload), &'static str> {
+    if channels == 0 {
+        return Err("Välj minst en ljudkanal.");
+    }
     let user = dest.user.trim();
     if let Some(reason) = username_hint(user) {
         return Err(reason);
@@ -310,6 +355,15 @@ pub(crate) fn stream_command(
         "MP3" => ("libmp3lame", "mp3", "audio/mpeg"),
         _ => return Err("Välj Opus eller MP3 under Kodek i destinationens inställningar."),
     };
+    if let Some(range) = bitrate_range(&dest.codec)
+        && !range.contains(&dest.bitrate)
+    {
+        return Err(if dest.codec == "MP3" {
+            "Välj en bithastighet mellan 32 och 320 kbit/s för MP3."
+        } else {
+            "Välj en bithastighet mellan 16 och 510 kbit/s för Opus."
+        });
+    }
     let mut command = ffmpeg(channels);
     if muxer == "ogg" {
         command.args(["-page_duration", "200000"]);
@@ -452,6 +506,10 @@ fn run_record(
     receiver: Receiver<Vec<f32>>,
     state: &State,
 ) {
+    if channels == 0 {
+        state.set_problem("Välj minst en ljudkanal.");
+        return;
+    }
     let format = settings.format.as_str();
     let quality = settings.quality;
     let (encoder, muxer, extension) = match format {
@@ -472,6 +530,16 @@ fn run_record(
             return;
         }
     };
+    if let Some(range) = bitrate_range(format)
+        && !range.contains(&quality)
+    {
+        state.set_problem(format!(
+            "Välj en bithastighet mellan {} och {} kbit/s för {format}.",
+            range.start(),
+            range.end()
+        ));
+        return;
+    }
     let (path, file) = match reserve_recording_path(
         Path::new(&settings.folder),
         &settings.filename_format,
@@ -542,7 +610,7 @@ fn verify_recording_path(path: &Path, identity: &same_file::Handle) -> Result<()
 
 #[derive(Clone, Copy)]
 pub(crate) struct LocalDateTime {
-    pub(crate) year: i32,
+    pub(crate) year: i64,
     pub(crate) month: u32,
     pub(crate) day: u32,
     pub(crate) hour: u32,
@@ -584,7 +652,7 @@ fn local_now() -> LocalDateTime {
         };
         unsafe { GetLocalTime(&mut st) };
         return LocalDateTime {
-            year: i32::from(st.year),
+            year: i64::from(st.year),
             month: u32::from(st.month),
             day: u32::from(st.day),
             hour: u32::from(st.hour),
@@ -603,7 +671,7 @@ fn local_now() -> LocalDateTime {
         {
             let tm = unsafe { tm.assume_init() };
             return LocalDateTime {
-                year: tm.tm_year + 1900,
+                year: i64::from(tm.tm_year) + 1900,
                 month: (tm.tm_mon + 1).max(1) as u32,
                 day: tm.tm_mday.max(1) as u32,
                 hour: tm.tm_hour.max(0) as u32,
@@ -630,7 +698,7 @@ pub(crate) fn utc_from_unix(unix: u64) -> LocalDateTime {
     let mp = (5 * doy + 2) / 153;
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = (y + i64::from(month <= 2)) as i32;
+    let year = y + i64::from(month <= 2);
     LocalDateTime {
         year,
         month,
@@ -640,6 +708,37 @@ pub(crate) fn utc_from_unix(unix: u64) -> LocalDateTime {
         second: secs % 60,
         unix,
     }
+}
+
+pub(crate) fn is_windows_reserved_name(stem: &str) -> bool {
+    let base = stem.split('.').next().unwrap_or("").trim_end();
+    matches!(
+        base.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn sanitize_source_name(name: &str) -> String {
@@ -695,7 +794,7 @@ pub(crate) fn format_recording_stem(template: &str, name: &str, now: LocalDateTi
         .take(128)
         .collect();
     let trimmed = sanitized.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || is_windows_reserved_name(trimmed) {
         "inspelning".to_owned()
     } else {
         trimmed.to_owned()

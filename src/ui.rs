@@ -3,7 +3,7 @@ use crate::feedback;
 use crate::listener_stats::{
     ConnectionProbeStatus, ConnectionTester, ListenerStats, MountStatus, StatsTarget,
 };
-use crate::output::OutputStatus;
+use crate::output::{OutputStatus, bitrate_range};
 use crate::settings::ThemePreference;
 use crate::{Destination, Engine, Settings, Source, settings_load, settings_save};
 use eframe::egui::{
@@ -1222,10 +1222,8 @@ impl Ui {
                             .position(|d| d.id == *dest_id)
                         {
                             let dest = &self.settings.destinations[pos];
-                            let target_status = live
-                                .targets
-                                .iter()
-                                .find(|ts| ts.name == dest.display_name());
+                            let target_status =
+                                live.targets.iter().find(|ts| ts.destination_id == *dest_id);
                             let listener_text = targets
                                 .get(pos)
                                 .and_then(|t| t.as_ref().ok())
@@ -5211,6 +5209,14 @@ fn meter_gradient_color(frac: f32, palette: Palette) -> Color32 {
 
 fn build_meter_gradient_mesh(rect: Rect, fill_frac: f32, palette: Palette) -> egui::epaint::Mesh {
     let mut mesh = egui::epaint::Mesh::default();
+    if !fill_frac.is_finite()
+        || !rect.left().is_finite()
+        || !rect.top().is_finite()
+        || !rect.right().is_finite()
+        || !rect.bottom().is_finite()
+    {
+        return mesh;
+    }
     let fill_frac = fill_frac.clamp(0.0, 1.0);
     if fill_frac <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return mesh;
@@ -5273,13 +5279,21 @@ fn layout_meter_scale_labels(
     candidates: &[(f32, f32)],
     min_gap: f32,
 ) -> Vec<PlacedScaleLabel> {
-    if bar_width <= 0.0 {
+    if !bar_left.is_finite()
+        || !bar_width.is_finite()
+        || !min_gap.is_finite()
+        || bar_width <= 0.0
+        || !(bar_left + bar_width).is_finite()
+    {
         return Vec::new();
     }
     let bar_right = bar_left + bar_width;
     let mut placed: Vec<PlacedScaleLabel> = Vec::with_capacity(candidates.len());
 
     for (index, &(db, width)) in candidates.iter().enumerate() {
+        if !width.is_finite() || width < 0.0 {
+            continue;
+        }
         let frac = db_to_meter_fraction(db);
         let tick_x = bar_left + bar_width * frac;
         let max_left = (bar_right - width).max(bar_left);
@@ -6586,16 +6600,6 @@ fn destination_settings(
     changed
 }
 
-fn bitrate_range(format: &str) -> Option<std::ops::RangeInclusive<u32>> {
-    if format.eq_ignore_ascii_case("mp3") {
-        Some(32..=320)
-    } else if format.eq_ignore_ascii_case("opus") {
-        Some(16..=510)
-    } else {
-        None
-    }
-}
-
 fn open_recording_folder(folder: &str) -> Result<(), String> {
     let path = std::path::absolute(folder)
         .map_err(|_| "Mappsökvägen kunde inte läsas. Välj inspelningsmappen igen.")?;
@@ -6618,6 +6622,9 @@ fn open_recording_folder(folder: &str) -> Result<(), String> {
 
 fn server_hint(value: &str) -> Option<&'static str> {
     let value = value.trim();
+    if value.chars().any(char::is_control) {
+        return Some("Ta bort ogiltiga kontrolltecken från serveradressen.");
+    }
     let Some((scheme, rest)) = value.split_once("://") else {
         return Some("Ange en serveradress som börjar med http:// eller https://.");
     };
@@ -6628,7 +6635,7 @@ fn server_hint(value: &str) -> Option<&'static str> {
         return Some("Ange serverns värdnamn eller IP-adress.");
     }
     if rest
-        .split(['/', '?', '#'])
+        .split(['/', '\\', '?', '#'])
         .next()
         .is_some_and(|authority| authority.ends_with(':'))
     {
@@ -6637,7 +6644,9 @@ fn server_hint(value: &str) -> Option<&'static str> {
     match url::Url::parse(value) {
         Ok(url) if url.port() == Some(0) => Some("Ange en port mellan 1 och 65535."),
         Err(url::ParseError::InvalidPort) => Some("Ange en port mellan 1 och 65535."),
-        Ok(url) if url.has_host() => None,
+        Ok(url) if url.has_host() && url.port_or_known_default().is_some_and(|port| port > 0) => {
+            None
+        }
         _ => Some("Kontrollera serverns värdnamn eller IP-adress."),
     }
 }
@@ -6648,6 +6657,8 @@ fn mount_hint(value: &str) -> Option<&'static str> {
         Some("Börja med / och ange ett namn, till exempel /live.")
     } else if mount.contains(['?', '#']) || mount.chars().any(char::is_control) {
         Some("Ta bort frågetecken, nummertecken och kontrolltecken.")
+    } else if crate::output::normalize_mount(mount).is_none() {
+        Some("Ange ett giltigt monteringsnamn efter /, till exempel /live.")
     } else {
         None
     }
@@ -6935,10 +6946,20 @@ mod tests {
             "http://localhost:",
             "http://localhost:65536",
             "http://localhost:0",
+            "http://localhost\n:8000",
         ] {
             assert!(server_hint(server).is_some(), "{server}");
         }
-        for mount in ["", "/", "live.opus", "/live?token", "/live#fragment"] {
+        for mount in [
+            "",
+            "/",
+            "/.",
+            "/..",
+            "/a/../",
+            "live.opus",
+            "/live?token",
+            "/live#fragment",
+        ] {
             assert!(mount_hint(mount).is_some(), "{mount}");
         }
         assert!(mount_hint("/möten/live.opus").is_none());
@@ -8129,5 +8150,87 @@ mod tests {
         assert_eq!(overview_columns(760.0, LayoutMode::Standard, true, 4), 2);
         // Narrow (~400 px): always 1 column
         assert_eq!(overview_columns(400.0, LayoutMode::Narrow, true, 4), 1);
+    }
+
+    #[test]
+    fn destination_summary_and_meter_geometry_guard_secrets_and_nonfinite_inputs() {
+        let dest = Destination {
+            server: "http://user:secret@example.org:99999?token=abc#frag".into(),
+            mount: "/live.opus".into(),
+            ..Destination::default()
+        };
+        let summary = destination_summary(&dest);
+        assert!(
+            !summary.contains("secret") && !summary.contains("token=abc"),
+            "{summary}"
+        );
+
+        let palette = Palette::for_theme(true);
+        let bad_rect = Rect::from_min_size(Pos2::new(f32::NAN, 0.0), Vec2::new(100.0, 10.0));
+        assert!(
+            build_meter_gradient_mesh(bad_rect, 0.5, palette)
+                .vertices
+                .is_empty()
+        );
+        assert!(
+            build_meter_gradient_mesh(
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 10.0)),
+                f32::NAN,
+                palette,
+            )
+            .vertices
+            .is_empty()
+        );
+        assert!(layout_meter_scale_labels(f32::NAN, 100.0, &[(-6.0, 10.0)], 4.0).is_empty());
+        assert!(layout_meter_scale_labels(0.0, 100.0, &[(-6.0, f32::NAN)], 4.0).is_empty());
+    }
+
+    #[test]
+    fn live_control_panel_matches_status_pills_for_unnamed_destinations() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        let engine = crate::engine::tests::test_engine();
+        let source = Source {
+            id: 1,
+            name: "Sal A".into(),
+            device: "mic-1".into(),
+            destination_ids: vec![10],
+            ..Source::default()
+        };
+        let dest = Destination {
+            id: 10,
+            name: String::new(),
+            server: "http://example.invalid:8000".into(),
+            mount: "/live.opus".into(),
+            ..Destination::default()
+        };
+        engine.update(std::slice::from_ref(&source));
+        engine.set_stream(&source, std::slice::from_ref(&dest), true);
+
+        let mut app = Ui::from_settings(
+            Ok(Settings {
+                destinations: vec![dest],
+                sources: vec![source],
+                ..Settings::default()
+            }),
+            engine,
+            None,
+        );
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 760.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                app.source_live_control_panel(ctx, Palette::for_theme(true));
+            },
+        );
+        let pill_fill = Palette::for_theme(true).warn_pill_bg;
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| { matches!(&s.shape, egui::Shape::Rect(rect) if rect.fill == pill_fill) })
+        );
     }
 }

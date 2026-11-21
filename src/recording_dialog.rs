@@ -49,7 +49,9 @@ impl SavedRecording {
                 {
                     self.error = None;
                 }
-                ui.label(format!(".{extension}"));
+                if !extension.is_empty() {
+                    ui.label(format!(".{extension}"));
+                }
             });
             if let Some(folder) = self.path.parent() {
                 ui.weak(folder.display().to_string());
@@ -114,13 +116,19 @@ impl SavedRecording {
         }
         if stem.is_empty()
             || stem.ends_with('.')
+            || crate::output::is_windows_reserved_name(stem)
             || stem.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
             || stem.chars().any(char::is_control)
         {
-            return Err("Ange ett filnamn, till exempel Kvällsmöte. Undvik snedstreck, specialtecken och punkt på slutet.".into());
+            return Err("Ange ett filnamn, till exempel Kvällsmöte. Undvik snedstreck, specialtecken, reserverade namn och punkt på slutet.".into());
         }
         let ext = self.path.extension().unwrap_or_default().to_string_lossy();
-        let target = self.path.with_file_name(format!("{stem}.{ext}"));
+        let filename = if ext.is_empty() {
+            stem.to_owned()
+        } else {
+            format!("{stem}.{ext}")
+        };
+        let target = self.path.with_file_name(filename);
         rename_without_overwrite(&self.path, &target).map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
                 "Namnet används redan. Välj ett annat filnamn.".into()
@@ -265,5 +273,22 @@ mod tests {
         assert_eq!(recording.path, dir.path().join("Kvällsmöte 1.2.wav"));
         assert_eq!(std::fs::read(&recording.path).unwrap(), b"audio");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn rename_rejects_windows_reserved_names_and_avoids_trailing_dot_without_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_ext_recording");
+        std::fs::write(&path, b"audio").unwrap();
+        let mut recording = SavedRecording::new("Sal".into(), path.clone());
+        for reserved in ["CON", "NUL", "COM1", "con.extra"] {
+            recording.name = reserved.into();
+            assert!(recording.apply_name().is_err(), "{reserved}");
+            assert!(path.exists());
+        }
+        recording.name = "renamed_no_ext".into();
+        recording.apply_name().unwrap();
+        assert_eq!(recording.path, dir.path().join("renamed_no_ext"));
+        assert_eq!(std::fs::read(&recording.path).unwrap(), b"audio");
     }
 }
