@@ -8071,7 +8071,16 @@ mod tests {
             let output = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     source_card(
-                        ui, &engine, &source, &[], true, true, true, true, false, palette,
+                        ui,
+                        &engine,
+                        &source,
+                        &[],
+                        true,
+                        true,
+                        true,
+                        true,
+                        false,
+                        palette,
                     );
                 });
             });
@@ -8085,8 +8094,12 @@ mod tests {
                 .collect();
             let pills: Vec<_> = rects
                 .filter(|rect| {
-                    [palette.pill_bg, palette.stream_pill_bg, palette.record_pill_bg]
-                        .contains(&rect.fill)
+                    [
+                        palette.pill_bg,
+                        palette.stream_pill_bg,
+                        palette.record_pill_bg,
+                    ]
+                    .contains(&rect.fill)
                 })
                 .collect();
             assert_eq!(buttons.len(), 3);

@@ -1,0 +1,1 @@
+[{"id":1,"name":"Sal A","device":"mic-1","device_name":"Mic 1","left":0,"right":null,"destinations":[{"server":"http://localhost:8000","mount":"/live.opus","user":"source","codec":"Opus","bitrate":96}]}]

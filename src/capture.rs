@@ -450,6 +450,25 @@ where
     }
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_reader(channels: usize, minimum_frames: usize, rate: u32) -> Reader {
+    Reader {
+        ring: Arc::new(AudioRing::new(channels, minimum_frames)),
+        channels,
+        rate,
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_push_f32(reader: &Reader, samples: &[f32]) {
+    reader.ring.push(samples);
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_push_i16(reader: &Reader, samples: &[i16]) {
+    reader.ring.push(samples);
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{AudioRing, Reader, input_configs};

@@ -241,6 +241,23 @@ fn public_client() -> reqwest::Result<reqwest::blocking::Client> {
         .build()
 }
 
+fn parse_probe_server_id(body: &[u8]) -> Option<String> {
+    let parsed = serde_json::from_slice::<ProbeResponse>(body).ok()?;
+    let server_id = parsed.icestats.server_id.filter(|s| !s.trim().is_empty())?;
+    Some(
+        server_id
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(100)
+            .collect(),
+    )
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn probe_server_id_from_json(body: &[u8]) -> Option<String> {
+    parse_probe_server_id(body)
+}
+
 fn probe_server(server: &str) -> Result<String, String> {
     let client = public_client().map_err(|_| "Kunde inte starta HTTP-klienten".to_owned())?;
     let started = Instant::now();
@@ -257,14 +274,7 @@ fn probe_server(server: &str) -> Result<String, String> {
     if code.is_success() {
         let mut body = Vec::new();
         let _ = response.take(MAX_RESPONSE_BYTES).read_to_end(&mut body);
-        if let Ok(parsed) = serde_json::from_slice::<ProbeResponse>(&body)
-            && let Some(server_id) = parsed.icestats.server_id.filter(|s| !s.trim().is_empty())
-        {
-            let name: String = server_id
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(100)
-                .collect();
+        if let Some(name) = parse_probe_server_id(&body) {
             return Ok(format!("{name} nåddes ({latency_ms} ms)"));
         }
         return Ok(format!("Servern nåddes ({latency_ms} ms)"));
@@ -301,7 +311,7 @@ fn fetch(url: &str) -> ServerResult {
     read_response(response.status(), response)
 }
 
-fn read_response(status: reqwest::StatusCode, response: impl Read) -> ServerResult {
+pub(crate) fn read_response(status: reqwest::StatusCode, response: impl Read) -> ServerResult {
     if !status.is_success() {
         let code = status.as_u16();
         let message = match code {
@@ -364,7 +374,7 @@ impl Count {
     }
 }
 
-fn parse(body: &[u8]) -> ServerResult {
+pub(crate) fn parse(body: &[u8]) -> ServerResult {
     let response: StatusResponse = serde_json::from_slice(body)
         .map_err(|_| "Serverns svar gick inte att läsa som lyssnarstatistik. Kontrollera att adressen går till rätt Icecast-server.")?;
     let streams = match response.icestats.source {

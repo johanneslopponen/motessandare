@@ -1,0 +1,206 @@
+name: Security & Dependencies
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-audit:
+    name: RustSec Advisory Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-audit
+
+      - name: Audit Cargo.lock files
+        run: |
+          set -euo pipefail
+          cargo audit --deny unsound --deny yanked
+          cargo audit --file fuzz/Cargo.lock --deny unsound --deny yanked
+
+  cargo-deny:
+    name: Dependency Policy (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories, licenses, bans, and sources
+        run: cargo deny --all-features check
+
+  unused-deps:
+    name: Unused Dependencies (cargo-machete)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-machete
+
+      - name: Check for unused dependencies
+        run: cargo machete --with-metadata
+
+  dependency-review:
+    name: PR Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # required by dependency-review-action to inspect PR diffs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          fail-on-severity: moderate
+          deny-licenses: GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+
+  secrets:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Gitleaks
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" -o "${RUNNER_TEMP}/gitleaks.tar.gz"
+          printf '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  %s\n' "${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}/bin" gitleaks
+          rm -f "${RUNNER_TEMP}/gitleaks.tar.gz"
+
+      - name: Scan repository for leaked secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            "${RUNNER_TEMP}/bin/gitleaks" git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}"
+          else
+            "${RUNNER_TEMP}/bin/gitleaks" git --redact --verbose
+          fi
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read # required by CodeQL for workflow analysis
+      contents: read
+      security-events: write # required to upload CodeQL SARIF results
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}
+
+  miri:
+    name: Miri Undefined Behavior Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
+          components: miri
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-miri
+
+      - name: Run pure unit tests under Miri
+        run: |
+          cargo +nightly miri test --locked --lib -- \
+            capture::tests:: \
+            engine::tests::converter_ \
+            engine::tests::device_removal_ \
+            engine::tests::meter_ \
+            engine::tests::changing_source_routing_ \
+            engine::tests::late_device_unplug_ \
+            engine::tests::missing_selected_channel_ \
+            listener_stats::tests::target_matches_ \
+            listener_stats::tests::parses_multiple_mounts_ \
+            listener_stats::tests::distinguishes_ \
+            listener_stats::tests::accepts_the_largest_ \
+            output::tests::formats_recording_filename_ \
+            settings::tests::restores_ \
+            settings::tests::rejects_corrupt_

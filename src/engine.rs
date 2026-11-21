@@ -15,7 +15,7 @@ use std::{
 
 const RATE: usize = 48_000;
 pub(super) const BLOCK_DURATION: Duration = Duration::from_millis(10);
-const FRAMES: usize = RATE * BLOCK_DURATION.as_millis() as usize / 1000;
+pub(crate) const FRAMES: usize = RATE * BLOCK_DURATION.as_millis() as usize / 1000;
 type Devices = Vec<(String, String, usize)>;
 
 struct Stream {
@@ -52,13 +52,13 @@ pub struct MeterLevel {
 }
 
 #[derive(Default)]
-struct ChannelMeter {
-    level: MeterLevel,
+pub(crate) struct ChannelMeter {
+    pub(crate) level: MeterLevel,
     hold_remaining: Duration,
 }
 
 impl ChannelMeter {
-    fn update(&mut self, peak: f32) {
+    pub(crate) fn update(&mut self, peak: f32) {
         self.level.signal = peak.max(self.level.signal * 0.93);
         self.level.clipped |= peak >= 1.0;
         if peak >= self.level.held {
@@ -452,9 +452,9 @@ impl Drop for Engine {
     }
 }
 
-struct Block {
-    channels: usize,
-    samples: Vec<f32>,
+pub(crate) struct Block {
+    pub(crate) channels: usize,
+    pub(crate) samples: Vec<f32>,
 }
 
 fn read_inputs(
@@ -566,7 +566,7 @@ impl Mixer {
     }
 }
 
-fn route(source: &Source, input: Option<&Block>) -> (Vec<f32>, (f32, f32), bool) {
+pub(crate) fn route(source: &Source, input: Option<&Block>) -> (Vec<f32>, (f32, f32), bool) {
     let channels = channel_count(source) as usize;
     let mut pcm = vec![0.0; FRAMES * channels];
     let mut peak = (0f32, 0f32);
@@ -593,7 +593,7 @@ fn route(source: &Source, input: Option<&Block>) -> (Vec<f32>, (f32, f32), bool)
 // Keep capture-device clocks independent of the fixed output timeline. A small
 // prebuffer absorbs hardware callback jitter. Fractional phase survives ticks.
 #[derive(Default)]
-struct Converter {
+pub(crate) struct Converter {
     stream: Option<Reader>,
     samples: Vec<f32>,
     phase: f64,
@@ -601,7 +601,7 @@ struct Converter {
 }
 
 impl Converter {
-    fn pull(&mut self, reader: &Reader) -> Option<Block> {
+    pub(crate) fn pull(&mut self, reader: &Reader) -> Option<Block> {
         let rate = reader.rate();
         let channels = reader.channels();
         if self

@@ -208,7 +208,7 @@ struct BoundPasswords {
 }
 
 // Returns true for older formats that need upgrading before the UI can use them.
-pub(super) fn restore_passwords(
+pub(crate) fn restore_passwords(
     bytes: &[u8],
     destinations: &mut [Destination],
     sources: &mut [RawSource],

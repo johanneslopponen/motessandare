@@ -294,7 +294,7 @@ pub fn username_hint(value: &str) -> Option<&'static str> {
         .then_some("Ta bort blanksteg och tecknen : / ? # @ % från Icecast-användarnamnet.")
 }
 
-fn stream_command(
+pub(crate) fn stream_command(
     dest: &Destination,
     channels: u16,
     target: &StreamTarget,
@@ -338,7 +338,7 @@ fn stream_command(
     ))
 }
 
-struct StreamUpload {
+pub(crate) struct StreamUpload {
     url: String,
     authorization: String,
     content_type: &'static str,
@@ -541,14 +541,14 @@ fn verify_recording_path(path: &Path, identity: &same_file::Handle) -> Result<()
 }
 
 #[derive(Clone, Copy)]
-struct LocalDateTime {
-    year: i32,
-    month: u32,
-    day: u32,
-    hour: u32,
-    minute: u32,
-    second: u32,
-    unix: u64,
+pub(crate) struct LocalDateTime {
+    pub(crate) year: i32,
+    pub(crate) month: u32,
+    pub(crate) day: u32,
+    pub(crate) hour: u32,
+    pub(crate) minute: u32,
+    pub(crate) second: u32,
+    pub(crate) unix: u64,
 }
 
 fn local_now() -> LocalDateTime {
@@ -618,7 +618,7 @@ fn local_now() -> LocalDateTime {
 }
 
 #[allow(dead_code)]
-fn utc_from_unix(unix: u64) -> LocalDateTime {
+pub(crate) fn utc_from_unix(unix: u64) -> LocalDateTime {
     let days = (unix / 86_400) as i64;
     let secs = (unix % 86_400) as u32;
     let z = days + 719_468;
@@ -662,7 +662,7 @@ fn sanitize_source_name(name: &str) -> String {
     }
 }
 
-fn format_recording_stem(template: &str, name: &str, now: LocalDateTime) -> String {
+pub(crate) fn format_recording_stem(template: &str, name: &str, now: LocalDateTime) -> String {
     let template = if template.trim().is_empty() {
         crate::settings::DEFAULT_FILENAME_FORMAT
     } else {

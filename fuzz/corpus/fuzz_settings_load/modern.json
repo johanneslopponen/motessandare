@@ -1,0 +1,1 @@
+{"compact_overview":false,"theme":"dark","destinations":[{"id":1,"name":"Huvudserver","server":"https://stream.example.org","mount":"/main.opus","user":"source","codec":"Opus","bitrate":96}],"sources":[{"id":1,"name":"Sal A","destination_ids":[1]}]}

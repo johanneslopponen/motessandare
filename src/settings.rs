@@ -1,4 +1,4 @@
-mod credentials;
+pub(crate) mod credentials;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -201,7 +201,7 @@ fn repair_ids<T>(items: &mut [T], id_of: impl Fn(&mut T) -> &mut u64) {
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
-struct RawSource {
+pub(crate) struct RawSource {
     id: u64,
     name: String,
     device: String,
@@ -231,25 +231,25 @@ impl Default for RawSource {
 }
 
 #[derive(Deserialize)]
-struct RawSettingsObject {
+pub(crate) struct RawSettingsObject {
     credential_account: Option<String>,
-    compact_overview: Option<bool>,
+    pub(crate) compact_overview: Option<bool>,
     #[serde(default)]
-    theme: ThemePreference,
+    pub(crate) theme: ThemePreference,
     #[serde(default)]
-    destinations: Vec<Destination>,
+    pub(crate) destinations: Vec<Destination>,
     #[serde(default)]
-    sources: Vec<RawSource>,
+    pub(crate) sources: Vec<RawSource>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum StoredSettings {
+pub(crate) enum StoredSettings {
     Object(RawSettingsObject),
     LegacyArray(Vec<RawSource>),
 }
 
-fn migrate_raw(
+pub(crate) fn migrate_raw(
     destinations: Vec<Destination>,
     raw_sources: Vec<RawSource>,
     compact_overview: Option<bool>,

@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+
+  lint:
+    name: Clippy & Docs (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Run Clippy (default features)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run Clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check documentation build
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --document-private-items
+
+  test:
+    name: Test & Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-nextest
+
+      - name: Run unit and fuzz-regression tests
+        run: cargo nextest run --locked --all-features
+
+      - name: Run doc tests
+        run: cargo test --locked --doc
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+  integration:
+    name: Integration (FFmpeg & Local TCP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies and FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev ffmpeg
+
+      - name: Verify FFmpeg codecs and protocols
+        run: |
+          set -euo pipefail
+          ffmpeg -hide_banner -protocols | grep -Eq '^[[:space:]]+pipe$'
+          ffmpeg -hide_banner -protocols | grep -Eq '^[[:space:]]+fd$'
+          ffmpeg -hide_banner -encoders | grep -Eq '\blibopus\b'
+          ffmpeg -hide_banner -encoders | grep -Eq '\blibmp3lame\b'
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Run ignored integration tests
+        run: cargo test --locked -- --ignored --skip round_trips_and_removes_credentials_with_the_system_store
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-cov
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 14
+
+  workflow-and-script-lint:
+    name: Workflow & Script Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: shellcheck, zizmor
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" -o "${RUNNER_TEMP}/actionlint.tar.gz"
+          printf '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  %s\n' "${RUNNER_TEMP}/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${RUNNER_TEMP}/bin" actionlint
+          rm -f "${RUNNER_TEMP}/actionlint.tar.gz"
+          printf '%s\n' "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: Lint shell scripts and GitHub workflows
+        run: |
+          set -euo pipefail
+          bash -n scripts/package-macos.sh
+          shellcheck -S warning scripts/*.sh
+          actionlint
+          zizmor --offline .github
