@@ -1,13 +1,23 @@
-use eframe::egui::{Context, Event, FullOutput, PointerButton, Pos2, RawInput, Rect, Shape, vec2};
+use eframe::egui::{
+    Context, Event, FullOutput, PointerButton, Pos2, RawInput, Rect, Shape, Ui, vec2,
+};
+
+/// Runs a headless egui pass and clears unapplied texture deltas for tests.
+pub(crate) fn run_ui(ctx: &Context, input: RawInput, run_ui: impl FnMut(&mut Ui)) -> FullOutput {
+    let mut output = ctx.run_ui(input, run_ui);
+    output.textures_delta.clear();
+    output
+}
 
 /// Clicks a rendered button and returns the frame in which the click was released.
 pub(crate) fn click_button(
     ctx: &Context,
     label: &str,
-    mut show: impl FnMut(&Context),
+    mut show: impl FnMut(&mut Ui),
 ) -> FullOutput {
     let mut frame = |events| {
-        ctx.run(
+        run_ui(
+            ctx,
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 1600.0))),
                 events,

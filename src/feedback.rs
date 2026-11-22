@@ -46,7 +46,7 @@ pub fn message(ui: &mut Ui, text: &str) -> bool {
 fn visible(ctx: &Context, id: Id, text: Option<&str>) -> bool {
     ctx.data_mut(|data| {
         let hidden = data.get_temp::<Id>(id);
-        if hidden.is_some() && hidden == text.map(Id::new) {
+        if hidden.is_some() && hidden == text.map(Id::unique) {
             return false;
         }
         data.remove::<Id>(id);
@@ -68,7 +68,7 @@ pub fn show_if_needed(
         && let Some(text) = text
         && show(ui, text)
     {
-        ui.data_mut(|data| data.insert_temp(id, Id::new(text)));
+        ui.data_mut(|data| data.insert_temp(id, Id::unique(text)));
     }
 }
 
@@ -80,18 +80,19 @@ mod tests {
     #[test]
     fn long_message_wraps_and_can_be_dismissed_independently_until_recovery() {
         let ctx = Context::default();
-        let first = Id::new("first");
-        let second = Id::new("second");
+        let first = Id::unique("first");
+        let second = Id::unique("second");
         let text = "Ljudet kunde inte skickas till Icecast. Kontrollera nätverket och inloggningsuppgifterna.";
         let draw = |events, reason: Option<&str>| {
-            ctx.run(
+            crate::test_ui::run_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(295.0, 400.0))),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    CentralPanel::default().show(ctx, |ui| {
+                |ui| {
+                    CentralPanel::default().show(ui, |ui| {
                         condition(ui, first, reason);
                         condition(ui, second, Some(text));
                     });
@@ -133,7 +134,7 @@ mod tests {
         }
         assert_eq!(bounds(&draw(vec![], Some(text)), text).len(), 1);
         assert!(visible(&ctx, first, Some("En annan orsak")));
-        ctx.data_mut(|data| data.insert_temp(first, Id::new(text)));
+        ctx.data_mut(|data| data.insert_temp(first, Id::unique(text)));
         draw(vec![], None);
         assert_eq!(bounds(&draw(vec![], Some(text)), text).len(), 2);
     }

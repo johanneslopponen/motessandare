@@ -30,7 +30,7 @@ impl SavedRecording {
 
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut close = false;
-        egui::Modal::new(egui::Id::new("saved-recording")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("saved-recording")).show(ctx, |ui| {
             ui.set_width(390.0);
             ui.heading("Inspelningen är sparad");
             ui.label(&self.source);
@@ -220,14 +220,14 @@ mod tests {
         let ctx = egui::Context::default();
         dialog.name = " Kvällsmöte ".into();
         let mut closed = false;
-        click_button(&ctx, "Spara namn", |ctx| closed |= dialog.show(ctx));
+        click_button(&ctx, "Spara namn", |ui| closed |= dialog.show(ui.ctx()));
         assert!(!closed);
         assert_eq!(dialog.path, saved);
         assert_eq!(dialog.name, "Kvällsmöte");
         assert!(!original.exists());
 
         dialog.name = "Utkast".into();
-        click_button(&ctx, "Klar", |ctx| closed |= dialog.show(ctx));
+        click_button(&ctx, "Klar", |ui| closed |= dialog.show(ui.ctx()));
         assert!(closed);
         assert_eq!(std::fs::read(saved).unwrap(), b"audio");
         assert!(!dir.path().join("Utkast.wav").exists());
@@ -243,9 +243,9 @@ mod tests {
         let mut dialog = SavedRecording::new("Sal".into(), original.clone());
         let ctx = egui::Context::default();
         dialog.name = "Arkiv".into();
-        click_button(&ctx, "Spara namn", |ctx| assert!(!dialog.show(ctx)));
+        click_button(&ctx, "Spara namn", |ui| assert!(!dialog.show(ui.ctx())));
         assert!(dialog.error.is_some());
-        click_button(&ctx, "Behåll namnet", |ctx| assert!(!dialog.show(ctx)));
+        click_button(&ctx, "Behåll namnet", |ui| assert!(!dialog.show(ui.ctx())));
         assert!(dialog.error.is_none());
         assert_eq!(dialog.name, "Möte");
         assert_eq!(std::fs::read(original).unwrap(), b"audio");
