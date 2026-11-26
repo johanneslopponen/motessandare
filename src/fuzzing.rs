@@ -29,9 +29,7 @@ pub fn fuzz_settings_load(settings_json: &[u8], credential_json: &[u8], server_u
     if let Ok(stored) = serde_json::from_slice::<StoredSettings>(settings_json) {
         let (mut destinations, mut raw_sources, theme) = match stored {
             StoredSettings::Object(raw) => (raw.destinations, raw.sources, raw.theme),
-            StoredSettings::LegacyArray(sources) => {
-                (Vec::new(), sources, ThemePreference::System)
-            }
+            StoredSettings::LegacyArray(sources) => (Vec::new(), sources, ThemePreference::System),
         };
 
         let _ =
