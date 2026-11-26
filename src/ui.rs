@@ -2138,19 +2138,6 @@ impl eframe::App for Ui {
                                     }
                                 });
                             });
-
-                        let show_compact =
-                            self.view == View::Overview && !self.settings.sources.is_empty();
-                        if show_compact {
-                            let mut compact = self
-                                .settings
-                                .compact_overview
-                                .unwrap_or(self.settings.sources.len() >= 4);
-                            if ui.checkbox(&mut compact, "Kompakt").changed() {
-                                self.settings.compact_overview = Some(compact);
-                                self.save_state.changed(Instant::now());
-                            }
-                        }
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2232,29 +2219,18 @@ impl eframe::App for Ui {
                         let mut open_settings_id = None;
                         let mut stream_toggle: Option<(u64, bool)> = None;
                         let mut record_toggle: Option<(u64, bool)> = None;
-                        let compact = self
-                            .settings
-                            .compact_overview
-                            .unwrap_or(self.settings.sources.len() >= 4);
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y =
-                                    if narrow || compact { 10.0 } else { 14.0 };
+                                ui.spacing_mut().item_spacing.y = if narrow { 10.0 } else { 14.0 };
                                 let avail_w = ui.available_width();
-                                let cols = overview_columns(
-                                    avail_w,
-                                    mode,
-                                    compact,
-                                    self.settings.sources.len(),
-                                );
+                                let cols = overview_columns(mode, self.settings.sources.len());
                                 if cols > 1 {
-                                    let spacing = if compact { 10.0 } else { 12.0 };
+                                    let spacing = 12.0;
                                     let col_width = ((avail_w - spacing * (cols as f32 - 1.0))
                                         / cols as f32)
                                         .floor()
                                         .max(260.0);
-                                    let card_narrow = narrow || (compact && col_width < 480.0);
                                     for row in self.settings.sources.chunks(cols) {
                                         ui.horizontal_top(|ui| {
                                             ui.spacing_mut().item_spacing.x = spacing;
@@ -2272,8 +2248,7 @@ impl eframe::App for Ui {
                                                                 self.engine.streaming(source.id),
                                                                 self.engine.recording(source.id),
                                                                 true,
-                                                                compact,
-                                                                card_narrow,
+                                                                narrow,
                                                                 palette,
                                                             );
                                                             if actions.open_settings {
@@ -2299,7 +2274,7 @@ impl eframe::App for Ui {
                                     };
                                     centered_column(ui, max_w, |ui| {
                                         ui.spacing_mut().item_spacing.y =
-                                            if narrow || compact { 10.0 } else { 14.0 };
+                                            if narrow { 10.0 } else { 14.0 };
                                         for source in &self.settings.sources {
                                             ui.push_id(source.id, |ui| {
                                                 let actions = source_card(
@@ -2310,7 +2285,6 @@ impl eframe::App for Ui {
                                                     self.engine.streaming(source.id),
                                                     self.engine.recording(source.id),
                                                     true,
-                                                    compact,
                                                     narrow,
                                                     palette,
                                                 );
@@ -2384,7 +2358,6 @@ impl eframe::App for Ui {
                                             destinations,
                                             streaming,
                                             recording,
-                                            false,
                                             false,
                                             narrow,
                                             palette,
@@ -3405,25 +3378,11 @@ fn centered_column(ui: &mut EguiUi, max_width: f32, add_contents: impl FnOnce(&m
     }
 }
 
-fn overview_columns(
-    avail_width: f32,
-    mode: LayoutMode,
-    compact: bool,
-    source_count: usize,
-) -> usize {
+fn overview_columns(mode: LayoutMode, source_count: usize) -> usize {
     if source_count <= 1 {
         return 1;
     }
-    if compact {
-        let max_cols = if avail_width >= 1000.0 {
-            3
-        } else if avail_width >= 660.0 {
-            2
-        } else {
-            1
-        };
-        max_cols.min(source_count)
-    } else if mode == LayoutMode::Wide {
+    if mode == LayoutMode::Wide {
         2.min(source_count)
     } else {
         1
@@ -4617,7 +4576,6 @@ fn source_card(
     streaming: bool,
     recording: bool,
     show_settings_button: bool,
-    compact: bool,
     narrow: bool,
     palette: Palette,
 ) -> SourceCardActions {
@@ -4692,7 +4650,7 @@ fn source_card(
                 palette.record_accent,
             );
         }
-        if streaming && (narrow || compact) {
+        if streaming && narrow {
             show_destinations(ui);
         }
     };
@@ -4704,7 +4662,7 @@ fn source_card(
         palette.card_border
     };
 
-    let margin = if compact || narrow {
+    let margin = if narrow {
         Margin::symmetric(10, 8)
     } else {
         Margin::symmetric(14, 10)
@@ -4712,7 +4670,7 @@ fn source_card(
     let frame = card_frame(palette, border_color).inner_margin(margin);
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = if compact { 4.0 } else { 6.0 };
+        ui.spacing_mut().item_spacing.y = 6.0;
 
         let present = live.present;
         let ready = present && !streaming && !recording;
@@ -4735,7 +4693,7 @@ fn source_card(
         }
         let stereo = source.right.is_some();
 
-        if narrow && !compact {
+        if narrow {
             // Narrow docked card: single-line header + slim labeled meter + equal-width split toggles
             ui.horizontal(|ui| {
                 let controls_w = if show_settings_button { 118.0 } else { 80.0 };
@@ -4903,115 +4861,52 @@ fn source_card(
             return;
         }
 
-        if compact {
-            ui.horizontal(|ui| {
-                let controls_w = if show_settings_button { 114.0 } else { 74.0 };
-                let gap = ui.spacing().item_spacing.x;
-                let ready_w = if ready { 54.0 + gap } else { 0.0 };
-                let title_max_w = (ui.available_width() - controls_w - ready_w - gap).max(0.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(title_max_w, 28.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(strong_text(
-                                source.display_name(),
-                                if narrow { FONT_TITLE_S } else { FONT_TITLE_M },
-                                palette.text_primary,
-                            ))
-                            .truncate(),
-                        );
-                    },
-                );
-                show_ready(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(strong_text(
+                source.display_name(),
+                FONT_TITLE_M,
+                palette.text_primary,
+            ));
+            crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
+            show_ready(ui);
+            show_activity(ui);
+
+            if show_settings_button {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    if show_settings_button
-                        && icon_button(
-                            ui,
-                            Icon::Settings,
-                            true,
-                            palette.text_secondary,
-                            false,
-                            palette,
-                            "Inställningar",
-                        )
-                        .clicked()
+                    if action_button(
+                        ui,
+                        Icon::Settings,
+                        "Inställningar",
+                        true,
+                        palette.text_secondary,
+                        ButtonVariant::Neutral,
+                        palette,
+                    )
+                    .clicked()
                     {
                         actions.open_settings = true;
                     }
-                    source_output_controls(
-                        ui,
-                        source,
-                        count,
-                        streaming,
-                        recording,
-                        true,
-                        palette,
-                        &mut actions,
-                    );
-                });
-            });
-            if streaming || recording {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    show_activity(ui);
                 });
             }
-        } else {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(strong_text(
-                    source.display_name(),
-                    FONT_TITLE_M,
-                    palette.text_primary,
-                ));
-                crate::guide::tip(ui, "Starta inspelning sparar ljudet på datorn. Starta sändning låter andra lyssna direkt.");
-                show_ready(ui);
-                show_activity(ui);
+        });
 
-                if show_settings_button {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if action_button(
-                            ui,
-                            Icon::Settings,
-                            "Inställningar",
-                            true,
-                            palette.text_secondary,
-                            ButtonVariant::Neutral,
-                            palette,
-                        )
-                        .clicked()
-                        {
-                            actions.open_settings = true;
-                        }
-                    });
-                }
-            });
-        }
-
-        if !compact {
-            let (sep_rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-            ui.painter()
-                .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
-        }
+        let (sep_rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+        ui.painter()
+            .rect_filled(sep_rect, CornerRadius::ZERO, palette.card_divider);
 
         source_status_notices(ui, engine, source, streaming, recording, &live, palette);
         ui.push_id(source.id, |ui| {
-            if compact {
-                compact_meter(ui, &levels[..if stereo { 2 } else { 1 }], palette);
-            } else {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                meter(
-                    ui,
-                    if stereo { "Vänster" } else { "Mono" },
-                    levels[0],
-                    !stereo,
-                    palette,
-                );
-                if stereo {
-                    meter(ui, "Höger", levels[1], true, palette);
-                }
+            ui.spacing_mut().item_spacing.y = 4.0;
+            meter(
+                ui,
+                if stereo { "Vänster" } else { "Mono" },
+                levels[0],
+                !stereo,
+                palette,
+            );
+            if stereo {
+                meter(ui, "Höger", levels[1], true, palette);
             }
             for (channel, level) in levels.iter().take(if stereo { 2 } else { 1 }).enumerate() {
                 if level.clipped {
@@ -5027,33 +4922,28 @@ fn source_card(
             }
         });
 
-        if !compact {
-            ui.horizontal_wrapped(|ui| {
-                source_output_controls(
-                    ui,
-                    source,
-                    count,
-                    streaming,
-                    recording,
-                    false,
-                    palette,
-                    &mut actions,
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), show_destinations);
-            });
-        }
+        ui.horizontal_wrapped(|ui| {
+            source_output_controls(
+                ui,
+                source,
+                count,
+                streaming,
+                recording,
+                palette,
+                &mut actions,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), show_destinations);
+        });
     });
     actions
 }
 
-#[allow(clippy::too_many_arguments)]
 fn source_output_controls(
     ui: &mut EguiUi,
     source: &Source,
     count: usize,
     streaming: bool,
     recording: bool,
-    compact: bool,
     palette: Palette,
     actions: &mut SourceCardActions,
 ) {
@@ -5065,32 +4955,16 @@ fn source_output_controls(
         (Icon::Broadcast, "Starta sändning", ButtonVariant::Neutral)
     };
     if with_disabled_reason(
-        if compact {
-            icon_button(
-                ui,
-                if streaming {
-                    Icon::BroadcastStop
-                } else {
-                    Icon::Broadcast
-                },
-                stream_enabled,
-                palette.stream_accent,
-                streaming,
-                palette,
-                stream_label,
-            )
-        } else {
-            action_button(
-                ui,
-                stream_icon,
-                stream_label,
-                stream_enabled,
-                palette.stream_accent,
-                stream_variant,
-                palette,
-            )
-            .on_hover_text("De som lyssnar kan höra ljudet medan du sänder.")
-        },
+        action_button(
+            ui,
+            stream_icon,
+            stream_label,
+            stream_enabled,
+            palette.stream_accent,
+            stream_variant,
+            palette,
+        )
+        .on_hover_text("De som lyssnar kan höra ljudet medan du sänder."),
         stream_enabled,
         stream_reason,
     )
@@ -5108,32 +4982,16 @@ fn source_output_controls(
         (Icon::Record, "Starta inspelning", ButtonVariant::Neutral)
     };
     if with_disabled_reason(
-        if compact {
-            icon_button(
-                ui,
-                if recording {
-                    Icon::RecordStop
-                } else {
-                    Icon::Record
-                },
-                record_enabled,
-                palette.record_accent,
-                false,
-                palette,
-                record_label,
-            )
-        } else {
-            action_button(
-                ui,
-                record_icon,
-                record_label,
-                record_enabled,
-                palette.record_accent,
-                record_variant,
-                palette,
-            )
-            .on_hover_text("Ljudet sparas i en fil på din dator.")
-        },
+        action_button(
+            ui,
+            record_icon,
+            record_label,
+            record_enabled,
+            palette.record_accent,
+            record_variant,
+            palette,
+        )
+        .on_hover_text("Ljudet sparas i en fil på din dator."),
         record_enabled,
         record_reason,
     )
@@ -7666,7 +7524,6 @@ mod tests {
                         false,
                         false,
                         true,
-                        false,
                         true,
                         palette,
                     );
@@ -7687,7 +7544,6 @@ mod tests {
             saved_recordings: VecDeque::new(),
             engine: Engine::new(),
             settings: Settings {
-                compact_overview: None,
                 theme: ThemePreference::System,
                 destinations: vec![Destination {
                     id: 1,
@@ -7799,7 +7655,6 @@ mod tests {
             saved_recordings: VecDeque::new(),
             engine: Engine::new(),
             settings: Settings {
-                compact_overview: Some(false),
                 theme: ThemePreference::Dark,
                 destinations: vec![
                     Destination {
@@ -8012,161 +7867,11 @@ mod tests {
     }
 
     #[test]
-    fn narrow_compact_source_card_fits_420px_and_is_shorter() {
-        let ctx = Context::default();
-        configure_fonts(&ctx);
-        let engine = Engine::new();
-        let source = Source {
-            id: 1,
-            name: "Mycket långt ljudkällnamn för smalt fönster".into(),
-            device: "Behringer UMC404HD".into(),
-            right: Some(1),
-            destination_ids: vec![1],
-            ..Source::default()
-        };
-        let destinations = vec![Destination {
-            id: 1,
-            name: "Huvudström".into(),
-            server: "http://example.invalid:8000".into(),
-            mount: "/live".into(),
-            ..Destination::default()
-        }];
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 600.0))),
-            ..Default::default()
-        };
-        let mut compact_rect = Rect::NOTHING;
-        let mut regular_rect = Rect::NOTHING;
-        let mut clip_right = 0.0;
-        let _ = run_ui(&ctx, input, |ui| {
-            let palette = Palette::for_theme(true);
-            egui::CentralPanel::default().show(ui, |ui| {
-                clip_right = ui.clip_rect().right();
-                compact_rect = ui
-                    .scope(|ui| {
-                        let _ = source_card(
-                            ui,
-                            &engine,
-                            &source,
-                            &destinations,
-                            true,
-                            true,
-                            true,
-                            true,
-                            true,
-                            palette,
-                        );
-                    })
-                    .response
-                    .rect;
-                regular_rect = ui
-                    .scope(|ui| {
-                        let _ = source_card(
-                            ui,
-                            &engine,
-                            &source,
-                            &destinations,
-                            false,
-                            false,
-                            true,
-                            false,
-                            true,
-                            palette,
-                        );
-                    })
-                    .response
-                    .rect;
-            });
-        });
-        assert!(
-            compact_rect.right() <= clip_right + 1.0,
-            "narrow compact card should fit 420px: right={}, clip_right={clip_right}",
-            compact_rect.right()
-        );
-        assert!(
-            compact_rect.height() < regular_rect.height(),
-            "compact narrow card ({}) should be shorter than regular narrow card ({})",
-            compact_rect.height(),
-            regular_rect.height()
-        );
-    }
-
-    #[test]
-    fn compact_activity_pills_do_not_overlap_output_buttons() {
-        let ctx = Context::default();
-        configure_fonts(&ctx);
-        let engine = Engine::new();
-        let source = Source {
-            name: "Tolkbåset".into(),
-            ..Source::default()
-        };
-        let palette = Palette::for_theme(true);
-        for width in [410.0, 530.0, 720.0] {
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 300.0))),
-                ..Default::default()
-            };
-            let output = run_ui(&ctx, input, |ui| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    source_card(
-                        ui,
-                        &engine,
-                        &source,
-                        &[],
-                        true,
-                        true,
-                        true,
-                        true,
-                        false,
-                        palette,
-                    );
-                });
-            });
-            let rects = output.shapes.iter().filter_map(|shape| match &shape.shape {
-                egui::Shape::Rect(rect) => Some(rect),
-                _ => None,
-            });
-            let buttons: Vec<_> = rects
-                .clone()
-                .filter(|rect| rect.rect.size() == Vec2::new(34.0, 28.0) && rect.stroke.is_empty())
-                .collect();
-            let pills: Vec<_> = rects
-                .filter(|rect| {
-                    [
-                        palette.pill_bg,
-                        palette.stream_pill_bg,
-                        palette.record_pill_bg,
-                    ]
-                    .contains(&rect.fill)
-                })
-                .collect();
-            assert_eq!(buttons.len(), 3);
-            assert_eq!(pills.len(), 3);
-            for pill in &pills {
-                for button in &buttons {
-                    assert!(
-                        !pill.rect.intersects(button.rect),
-                        "activity pill overlaps a button at width {width}: {:?} and {:?}",
-                        pill.rect,
-                        button.rect
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn compact_overview_scales_to_multi_column_in_wide_and_standard() {
-        // Fullscreen / wide central area (~1580 px): 3 compact columns vs 2 normal columns
-        assert_eq!(overview_columns(1580.0, LayoutMode::Wide, false, 3), 2);
-        assert_eq!(overview_columns(1580.0, LayoutMode::Wide, true, 3), 3);
-        // Medium wide (~920 px): 2 compact columns instead of collapsing to 1
-        assert_eq!(overview_columns(920.0, LayoutMode::Wide, true, 4), 2);
-        // Standard (~760 px): 2 compact columns vs 1 normal column
-        assert_eq!(overview_columns(760.0, LayoutMode::Standard, false, 4), 1);
-        assert_eq!(overview_columns(760.0, LayoutMode::Standard, true, 4), 2);
-        // Narrow (~400 px): always 1 column
-        assert_eq!(overview_columns(400.0, LayoutMode::Narrow, true, 4), 1);
+    fn overview_scales_to_two_columns_in_wide_mode() {
+        assert_eq!(overview_columns(LayoutMode::Wide, 1), 1);
+        assert_eq!(overview_columns(LayoutMode::Wide, 3), 2);
+        assert_eq!(overview_columns(LayoutMode::Standard, 4), 1);
+        assert_eq!(overview_columns(LayoutMode::Narrow, 4), 1);
     }
 
     #[test]

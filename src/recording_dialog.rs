@@ -29,7 +29,16 @@ impl SavedRecording {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
+        self.show_with_reveal(ctx, reveal_file)
+    }
+
+    fn show_with_reveal(
+        &mut self,
+        ctx: &egui::Context,
+        reveal_action: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> bool {
         let mut close = false;
+        let mut reveal_action = Some(reveal_action);
         egui::Modal::new(egui::Id::unique("saved-recording")).show(ctx, |ui| {
             ui.set_width(390.0);
             ui.heading("Inspelningen är sparad");
@@ -67,24 +76,20 @@ impl SavedRecording {
                     .path
                     .file_stem()
                     .is_some_and(|stem| stem != self.name.as_str());
-                if changed && ui.button("Spara namn").clicked() {
-                    self.error = self.apply_name().err();
-                }
-                let reveal = if cfg!(windows) {
-                    "Visa i Utforskaren"
-                } else if cfg!(target_os = "macos") {
-                    "Visa i Finder"
+                let reveal = reveal_button_label();
+                let reveal_hint = if changed {
+                    "Spara filnamnet och visa inspelningen"
                 } else {
-                    "Visa mapp"
+                    "Visa inspelningen"
                 };
-                if ui
-                    .button(reveal)
-                    .on_hover_text("Spara filnamnet och visa inspelningen")
-                    .clicked()
-                {
-                    self.error = self
-                        .apply_name()
-                        .and_then(|_| reveal_file(&self.path))
+                if ui.button(reveal).on_hover_text(reveal_hint).clicked() {
+                    let result = if changed { self.apply_name() } else { Ok(()) };
+                    self.error = result
+                        .and_then(|_| {
+                            reveal_action
+                                .take()
+                                .map_or(Ok(()), |action| action(&self.path))
+                        })
                         .err();
                 }
                 if changed && ui.button("Behåll namnet").clicked() {
@@ -96,12 +101,23 @@ impl SavedRecording {
                         .into_owned();
                     self.error = None;
                 }
-                if ui
-                    .button("Klar")
-                    .on_hover_text("Stäng med det senast sparade filnamnet")
-                    .clicked()
-                {
-                    close = true;
+                let done_hint = if changed {
+                    "Spara filnamnet och stäng"
+                } else {
+                    "Stäng"
+                };
+                if ui.button("Klar").on_hover_text(done_hint).clicked() {
+                    if changed {
+                        match self.apply_name() {
+                            Ok(()) => {
+                                self.error = None;
+                                close = true;
+                            }
+                            Err(error) => self.error = Some(error),
+                        }
+                    } else {
+                        close = true;
+                    }
                 }
             });
         });
@@ -175,6 +191,16 @@ fn rename_without_overwrite(from: &Path, to: &Path) -> io::Result<()> {
     original.persist_noclobber(to).map_err(|e| e.error)
 }
 
+fn reveal_button_label() -> &'static str {
+    if cfg!(windows) {
+        "Visa i Utforskaren"
+    } else if cfg!(target_os = "macos") {
+        "Visa i Finder"
+    } else {
+        "Visa mapp"
+    }
+}
+
 fn reveal_file(path: &Path) -> Result<(), String> {
     std::fs::metadata(path).map_err(|err| {
         format!(
@@ -211,30 +237,71 @@ mod tests {
     use crate::test_ui::click_button;
 
     #[test]
-    fn save_name_keeps_dialog_open_and_done_keeps_the_last_saved_name() {
+    fn reveal_saves_changed_name_and_keeps_dialog_open_and_done_saves_next_change() {
         let dir = tempfile::tempdir().unwrap();
         let original = dir.path().join("Möte.wav");
         let saved = dir.path().join("Kvällsmöte.wav");
+        let final_path = dir.path().join("Utkast.wav");
         std::fs::write(&original, b"audio").unwrap();
         let mut dialog = SavedRecording::new("Sal".into(), original.clone());
         let ctx = egui::Context::default();
         dialog.name = " Kvällsmöte ".into();
         let mut closed = false;
-        click_button(&ctx, "Spara namn", |ui| closed |= dialog.show(ui.ctx()));
+        let mut revealed = Vec::new();
+        click_button(&ctx, reveal_button_label(), |ui| {
+            closed |= dialog.show_with_reveal(ui.ctx(), |path| {
+                revealed.push(path.to_path_buf());
+                Ok(())
+            });
+        });
         assert!(!closed);
         assert_eq!(dialog.path, saved);
         assert_eq!(dialog.name, "Kvällsmöte");
+        assert_eq!(revealed, vec![saved.clone()]);
         assert!(!original.exists());
 
-        dialog.name = "Utkast".into();
+        dialog.name = " Utkast ".into();
         click_button(&ctx, "Klar", |ui| closed |= dialog.show(ui.ctx()));
         assert!(closed);
-        assert_eq!(std::fs::read(saved).unwrap(), b"audio");
-        assert!(!dir.path().join("Utkast.wav").exists());
+        assert_eq!(dialog.path, final_path);
+        assert_eq!(dialog.name, "Utkast");
+        assert!(!saved.exists());
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"audio");
     }
 
     #[test]
-    fn keep_name_discards_a_conflicting_edit_and_clears_the_error() {
+    fn done_closes_without_changes_and_keeps_open_on_rename_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("Möte.wav");
+        let existing = dir.path().join("Arkiv.wav");
+        std::fs::write(&original, b"audio").unwrap();
+        std::fs::write(&existing, b"existing").unwrap();
+        let mut dialog = SavedRecording::new("Sal".into(), original.clone());
+        let ctx = egui::Context::default();
+
+        dialog.name = "Arkiv".into();
+        let mut closed = false;
+        click_button(&ctx, "Klar", |ui| closed |= dialog.show(ui.ctx()));
+        assert!(!closed);
+        assert!(dialog.error.is_some());
+        assert_eq!(dialog.path, original);
+        assert_eq!(std::fs::read(&original).unwrap(), b"audio");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"existing");
+
+        click_button(&ctx, "Behåll namnet", |ui| {
+            closed |= dialog.show(ui.ctx());
+        });
+        assert!(!closed);
+        assert!(dialog.error.is_none());
+
+        click_button(&ctx, "Klar", |ui| closed |= dialog.show(ui.ctx()));
+        assert!(closed);
+        assert_eq!(dialog.path, original);
+        assert_eq!(std::fs::read(&original).unwrap(), b"audio");
+    }
+
+    #[test]
+    fn reveal_does_not_open_on_conflict_and_keep_name_clears_error() {
         let dir = tempfile::tempdir().unwrap();
         let original = dir.path().join("Möte.flac");
         let existing = dir.path().join("Arkiv.flac");
@@ -243,7 +310,14 @@ mod tests {
         let mut dialog = SavedRecording::new("Sal".into(), original.clone());
         let ctx = egui::Context::default();
         dialog.name = "Arkiv".into();
-        click_button(&ctx, "Spara namn", |ui| assert!(!dialog.show(ui.ctx())));
+        let mut revealed = false;
+        click_button(&ctx, reveal_button_label(), |ui| {
+            assert!(!dialog.show_with_reveal(ui.ctx(), |_| {
+                revealed = true;
+                Ok(())
+            }));
+        });
+        assert!(!revealed);
         assert!(dialog.error.is_some());
         click_button(&ctx, "Behåll namnet", |ui| assert!(!dialog.show(ui.ctx())));
         assert!(dialog.error.is_none());

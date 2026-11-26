@@ -295,7 +295,6 @@ fn hydrate(
         StoredSettings::Object(raw) => raw,
         StoredSettings::LegacyArray(sources) => RawSettingsObject {
             credential_account: None,
-            compact_overview: None,
             theme: ThemePreference::System,
             destinations: Vec::new(),
             sources,
@@ -313,12 +312,7 @@ fn hydrate(
             &mut raw.sources,
         )?;
     }
-    let mut settings = migrate_raw(
-        raw.destinations,
-        raw.sources,
-        raw.compact_overview,
-        raw.theme,
-    );
+    let mut settings = migrate_raw(raw.destinations, raw.sources, raw.theme);
     for dest in &mut settings.destinations {
         if let Some(server) = dest.server_without_secrets() {
             dest.server = server;

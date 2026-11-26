@@ -27,21 +27,16 @@ pub fn fuzz_icecast_stats(data: &[u8]) {
 
 pub fn fuzz_settings_load(settings_json: &[u8], credential_json: &[u8], server_url: &str) {
     if let Ok(stored) = serde_json::from_slice::<StoredSettings>(settings_json) {
-        let (mut destinations, mut raw_sources, compact_overview, theme) = match stored {
-            StoredSettings::Object(raw) => (
-                raw.destinations,
-                raw.sources,
-                raw.compact_overview,
-                raw.theme,
-            ),
+        let (mut destinations, mut raw_sources, theme) = match stored {
+            StoredSettings::Object(raw) => (raw.destinations, raw.sources, raw.theme),
             StoredSettings::LegacyArray(sources) => {
-                (Vec::new(), sources, None, ThemePreference::System)
+                (Vec::new(), sources, ThemePreference::System)
             }
         };
 
         let _ =
             credentials::restore_passwords(credential_json, &mut destinations, &mut raw_sources);
-        let settings = settings::migrate_raw(destinations, raw_sources, compact_overview, theme);
+        let settings = settings::migrate_raw(destinations, raw_sources, theme);
 
         let mut dest_ids = HashSet::with_capacity(settings.destinations.len());
         for dest in &settings.destinations {

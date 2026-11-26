@@ -202,7 +202,6 @@ pub enum ThemePreference {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub compact_overview: Option<bool>,
     pub theme: ThemePreference,
     pub destinations: Vec<Destination>,
     pub sources: Vec<Source>,
@@ -275,7 +274,6 @@ impl Default for RawSource {
 #[derive(Deserialize)]
 pub(crate) struct RawSettingsObject {
     credential_account: Option<String>,
-    pub(crate) compact_overview: Option<bool>,
     #[serde(default)]
     pub(crate) theme: ThemePreference,
     #[serde(default)]
@@ -294,7 +292,6 @@ pub(crate) enum StoredSettings {
 pub(crate) fn migrate_raw(
     destinations: Vec<Destination>,
     raw_sources: Vec<RawSource>,
-    compact_overview: Option<bool>,
     theme: ThemePreference,
 ) -> Settings {
     let original_ids: HashSet<u64> = destinations
@@ -303,7 +300,6 @@ pub(crate) fn migrate_raw(
         .filter(|id| *id != 0)
         .collect();
     let mut settings = Settings {
-        compact_overview,
         theme,
         destinations,
         sources: Vec::with_capacity(raw_sources.len()),
@@ -462,7 +458,7 @@ mod tests {
         let mut sources: Vec<RawSource> =
             serde_json::from_str(r#"[{"destinations":[{},{}]},{"destinations":[{}]}]"#).unwrap();
         restore_passwords(br#"[["first","shared"],["shared"]]"#, &mut [], &mut sources).unwrap();
-        let settings = migrate_raw(Vec::new(), sources, None, ThemePreference::System);
+        let settings = migrate_raw(Vec::new(), sources, ThemePreference::System);
         assert_eq!(settings.destinations.len(), 2);
         assert_eq!(settings.destinations[0].password, "first");
         assert_eq!(settings.destinations[1].password, "shared");
@@ -502,7 +498,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("sources.json");
         let settings = Settings {
-            compact_overview: Some(false),
             theme: ThemePreference::Dark,
             destinations: vec![
                 Destination {

@@ -9,9 +9,9 @@ Mötessändare är ett svenskspråkigt skrivbordsprogram för att direktsända m
 3. För inspelning, välj mapp och filformat under **Lokal inspelning**. Formaten är WAV, FLAC, Opus och MP3.
 4. Gå till **Översikt**. Inställningarna sparas automatiskt efter en kort paus i redigeringen. Du kan starta sändning och inspelning var för sig och följa ljudnivå, inspelningstid och anslutna sändningsmål.
 
-Välj **Kompakt översikt** för att se fler källor samtidigt. Nivåmätarens toppmarkör håller kvar korta ljudtoppar. Om signalen når klippgränsen visas en indikator som du kan återställa efter att du har kontrollerat nivån. **?** bredvid appnamnet visar små frågetecken vid reglagen. Peka eller klicka på dem för ett kort tips.
+Nivåmätarens toppmarkör håller kvar korta ljudtoppar. Om signalen når klippgränsen visas en indikator som du kan återställa efter att du har kontrollerat nivån. **?** bredvid appnamnet visar små frågetecken vid reglagen. Peka eller klicka på dem för ett kort tips.
 
-När du stoppar en inspelning och filen är färdigskriven kan du byta namn på den. **Spara namn** håller dialogen öppen så att du kan visa filen i Utforskaren eller Finder. **Klar** stänger dialogen.
+När du stoppar en inspelning och filen är färdigskriven kan du byta namn på den. Både **Klar** och knappen för att visa filen i Utforskaren eller Finder sparar namnet om det har ändrats.
 
 Öppna **Lyssnarstatistik** med diagramikonen bredvid **?**. Vyn hämtar antalet anslutna lyssnare och lyssnartoppen per destination från Icecasts publika `/status-json.xsl`. Siffrorna uppdateras var tionde sekund medan vyn är öppen. Lyssnartoppen gäller den pågående sändningsanslutningen.
 
